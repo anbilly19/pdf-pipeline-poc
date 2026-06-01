@@ -1,4 +1,4 @@
-"""Simple CLI runner for the agent — use this to smoke-test before the UI."""
+"""Simple CLI runner for the agent — smoke-test before the UI."""
 from __future__ import annotations
 
 import logging
@@ -29,18 +29,18 @@ def run_cli(model: str = "gemma4:e2b") -> None:
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
-    print(f"\nPDF Agent bereit (model={model}, thread={thread_id[:8]})")
-    print("Tippe 'exit' zum Beenden.\n")
+    print(f"\nPDF Agent ready (model={model}, thread={thread_id[:8]})")
+    print("Type 'exit' to quit.\n")
 
     while True:
         try:
-            user_input = input("Du: ").strip()
+            user_input = input("You: ").strip()
         except (EOFError, KeyboardInterrupt):
-            print("\nTschüss!")
+            print("\nBye!")
             break
 
         if user_input.lower() in ("exit", "quit", "q"):
-            print("Tschüss!")
+            print("Bye!")
             break
 
         if not user_input:
@@ -51,7 +51,7 @@ def run_cli(model: str = "gemma4:e2b") -> None:
             config=config,
         )
         last = result["messages"][-1]
-        print(f"\nAssistent: {last.content}\n")
+        print(f"\nAssistant: {last.content}\n")
 
 
 if __name__ == "__main__":

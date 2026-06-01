@@ -46,6 +46,12 @@ class ToolResult:
         )
 
 
+NO_RESULTS = "No relevant passages found."
+NO_TABLE = "No table found."
+NO_SECTION = "Section not found."
+NO_REGION = "No region found on page."
+
+
 def build_tools(retriever: BBoxRetriever) -> list[object]:
     """Build all agent tools bound to a retriever instance.
 
@@ -68,7 +74,7 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
         """
         chunks = retriever.retrieve(query, top_k=top_k)
         if not chunks:
-            return "Keine relevanten Abschnitte gefunden."
+            return NO_RESULTS
 
         results = [str(ToolResult(
             content=c.text,
@@ -89,14 +95,12 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
         """
         chunks = retriever.retrieve(query, top_k=5, filter_chunk_type="table")
         if not chunks:
-            # fallback: search all chunk types
             chunks = retriever.retrieve(query, top_k=3)
 
         if not chunks:
-            return "Keine Tabelle gefunden."
+            return NO_TABLE
 
         best: Chunk = chunks[0]
-        # convert markdown table to CSV if possible
         csv_str = _markdown_table_to_csv(best.text)
 
         result = ToolResult(
@@ -118,10 +122,9 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
         """
         chunks = retriever.retrieve(title, top_k=4)
         if not chunks:
-            return f"Abschnitt '{title}' nicht gefunden."
+            return NO_SECTION
 
         combined = "\n\n".join(c.text for c in chunks)
-        # aggregate all bboxes from the section
         all_bboxes = [bbox for c in chunks for bbox in c.bboxes]
         result = ToolResult(
             content=combined,
@@ -141,15 +144,14 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
         Use this when the user asks to highlight or point to a specific
         part of the document. Returns bbox coordinates and the page image path.
         """
-        chunks = retriever.retrieve(query, top_k=10, filter_doc_id=None)
+        chunks = retriever.retrieve(query, top_k=10)
         page_chunks = [c for c in chunks if c.page_number == page_number]
 
         if not page_chunks:
-            # fall back to any page
             page_chunks = chunks[:3]
 
         if not page_chunks:
-            return f"Keine Region auf Seite {page_number} gefunden."
+            return NO_REGION
 
         all_bboxes = [bbox for c in page_chunks for bbox in c.bboxes]
         result = ToolResult(
@@ -166,7 +168,7 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
 def _markdown_table_to_csv(text: str) -> str:
     """Convert a markdown table string to CSV format.
 
-    Falls back to returning the original text if it's not a valid
+    Falls back to returning the original text if it is not a valid
     markdown table.
 
     Args:
@@ -176,7 +178,10 @@ def _markdown_table_to_csv(text: str) -> str:
         CSV string, or original text if conversion fails.
     """
     lines = [line.strip() for line in text.strip().splitlines()]
-    table_lines = [l for l in lines if l.startswith("|") and not set(l.replace("|", "").replace("-", "").replace(" ", "")) == set()]
+    table_lines = [
+        line for line in lines
+        if line.startswith("|") and set(line.replace("|", "").replace("-", "").replace(" ", "")) != set()
+    ]
 
     if not table_lines:
         return text

@@ -24,15 +24,15 @@ from src.agent.tools import build_tools
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """Du bist ein intelligenter Dokumentenassistent für das SG Magazin.
-Du beantwortest Fragen auf Deutsch und nutzt die verfügbaren Tools um präzise
-Antworten mit Seitenreferenzen zu geben.
+_SYSTEM_PROMPT = """You are an intelligent document assistant for SG Magazin.
+Answer questions based on the document content using the available tools.
 
-Wichtig:
-- Nutze immer search_term um relevante Abschnitte zu finden bevor du antwortest.
-- Gib immer die Seitenzahl und die Bounding-Box-Koordinaten der Quelle an.
-- Bei Tabellen nutze extract_table_to_csv.
-- Wenn der Nutzer auf eine bestimmte Stelle hingewiesen werden soll, nutze highlight_section.
+Rules:
+- Always use search_term to find relevant passages before answering.
+- Always cite the page number and bounding box coordinates of your source.
+- For tables use extract_table_to_csv.
+- To point the user to a specific location use highlight_section.
+- Respond in the same language the user writes in.
 """
 
 
@@ -67,7 +67,6 @@ def build_agent(
     def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
         """Invoke the LLM with the current message history."""
         messages = state["messages"]
-        # prepend system prompt on first turn
         from langchain_core.messages import SystemMessage  # noqa: PLC0415
         if not any(isinstance(m, SystemMessage) for m in messages):
             messages = [SystemMessage(content=_SYSTEM_PROMPT)] + messages

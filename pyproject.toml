@@ -10,7 +10,6 @@ dependencies = [
     "pymupdf-layout>=1.27.2.3",            # CPU layout parser; brings in its own pymupdf
     "pdfmux>=0.3",                         # primary extractor — smart router
     # Embeddings & vector store
-    "sentence-transformers>=3.3",
     # LangGraph 1.2.2 / LangChain 1.3.2 (latest stable as of June 2026)
     "langgraph>=1.2.2",
     "langgraph-checkpoint>=2.0",

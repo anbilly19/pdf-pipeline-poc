@@ -5,7 +5,7 @@ description = "Agentic PDF pipeline with bounding-box citation for German-langua
 requires-python = ">=3.12,<3.15"
 dependencies = [
     # PDF extraction
-    "pymupdf>=1.24.9,<1.25.0",             # pinned: magic-pdf[full] requires <1.25
+    "pymupdf>=1.24.9,<1.25.0",             # pinned: magic-pdf requires <1.25
     "pymupdf4llm>=0.0.17",
     "pdfmux>=0.3",
 
@@ -34,8 +34,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# MinerU VLM fallback — install models separately via: python -m magic_pdf.download
+# [full] extra dropped: it pins doclayout-yolo==0.0.2b1 (pre-release, no Windows/py3.13+ wheel)
 gpu = [
-    "magic-pdf[full]>=1.3",               # MinerU VLM fallback; requires pymupdf<1.25 (already pinned above)
+    "magic-pdf>=1.3",
 ]
 
 [dependency-groups]

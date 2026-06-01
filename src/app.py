@@ -37,7 +37,6 @@ _DEFAULT_TOP_K = 15
 
 def _init_session() -> None:
     defaults = {
-        "thread_id": str(uuid.uuid4()),
         "messages": [],
         "agent": None,
         "indexed_doc": None,
@@ -86,7 +85,6 @@ def main() -> None:
             st.success(f"Indexed {n} chunks from {uploaded.name}")
             st.session_state.indexed_doc = pdf_path.stem
             st.session_state.messages = []
-            st.session_state.thread_id = str(uuid.uuid4())
             retriever = BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K)
             st.session_state.agent = build_agent(
                 retriever=retriever, provider=provider, model=model
@@ -97,7 +95,6 @@ def main() -> None:
         st.divider()
         if st.button("Clear conversation"):
             st.session_state.messages = []
-            st.session_state.thread_id = str(uuid.uuid4())
             st.rerun()
 
     chat_col, view_col = st.columns([3, 2])
@@ -122,7 +119,6 @@ def main() -> None:
                         from langchain_core.messages import HumanMessage  # noqa: PLC0415
                         result = st.session_state.agent.invoke(
                             {"messages": [HumanMessage(content=prompt)]},
-                            config={"configurable": {"thread_id": st.session_state.thread_id}},
                         )
                         last = result["messages"][-1]
                         answer = last.content
@@ -146,18 +142,29 @@ def main() -> None:
 
 
 def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, object]]:
+    """Parse all [source: page N, bboxes=[[...], [...]]] annotations from tool messages.
+
+    The previous regex `\[.*?\]` was non-greedy and matched only the first inner
+    list in a multi-bbox result like `[[x,y,w,h], [x,y,w,h]]`. This version
+    matches the full outer list greedily so all bboxes are captured correctly.
+    """
     from langchain_core.messages import ToolMessage  # noqa: PLC0415
     import re, ast  # noqa: PLC0415, E401
     sources: list[dict[str, object]] = []
+    seen_pages: set[int] = set()
     for msg in messages:
         if not isinstance(msg, ToolMessage):
             continue
-        match = re.search(r"\[source: page (\d+), bboxes=(\[.*?\])", str(msg.content))
-        if match:
+        # Greedily match the full outer bbox list including nested lists
+        for match in re.finditer(r"\[source: page (\d+), bboxes=(\[\[.*?\]\])", str(msg.content), re.DOTALL):
             try:
                 page = int(match.group(1))
+                if page in seen_pages:
+                    continue
                 bboxes = ast.literal_eval(match.group(2))
-                sources.append({"page": page, "bboxes": bboxes, "image_path": _find_image_path(page)})
+                image_path = _find_image_path(page)
+                sources.append({"page": page, "bboxes": bboxes, "image_path": image_path})
+                seen_pages.add(page)
             except Exception:  # noqa: BLE001
                 pass
     return sources

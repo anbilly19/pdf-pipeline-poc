@@ -34,14 +34,17 @@ Mandatory rules — never skip any of these:
    If the first search returns no useful results, call search_term again with
    alternative synonyms (e.g. "Beendigung" if "Vertragsende" found nothing,
    "Subunternehmer" if "Unterauftragnehmer" found nothing).
-2. ALWAYS end your answer with a source citation in EXACTLY this format:
+2. Read ALL chunks returned by the tool carefully before composing your answer.
+   Do NOT stop at the first chunk. If multiple chunks are relevant to the question,
+   incorporate ALL of them into your answer.
+3. ALWAYS end your answer with source citations for EVERY chunk you used, in EXACTLY this format:
    [Quelle: Seite <N>, Bboxes: <bboxes>]
-   Copy the page number and bboxes verbatim from the tool result.
-3. If no relevant passage is found after two searches, say so explicitly.
+   Copy page numbers and bboxes verbatim from the tool results. One citation per source chunk.
+4. If no relevant passage is found after two searches, say so explicitly.
    Do NOT invent or paraphrase content not present in the tool results.
-4. For tables use extract_table_to_csv.
-5. To point the user to a specific location use highlight_section.
-6. Respond in the same language the user writes in.
+5. For tables use extract_table_to_csv.
+6. To point the user to a specific location use highlight_section.
+7. Respond in the same language the user writes in.
 """
 
 _SYSTEM_MESSAGE = SystemMessage(content=_SYSTEM_PROMPT)

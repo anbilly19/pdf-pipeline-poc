@@ -1,12 +1,12 @@
-"""Top-level pipeline orchestrator for Phase 1.
+"""Top-level pipeline orchestrator (extraction + rendering + chunking).
 
-Wires together: extraction -> rendering -> chunking.
-Phase 2 will add: embedding -> vector store -> agent.
+Phase 2 write path is in src/indexer.py.
+Phase 2 read path is in src/retrieval/retriever.py.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.chunking.chunker import ChunkerConfig, LayoutChunker
@@ -19,11 +19,11 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class PipelineConfig:
-    """Configuration for the full pipeline.
+    """Configuration for the extraction + chunking pipeline.
 
     Args:
         confidence_threshold: Pages below this trigger fallback extraction.
-        max_chunk_chars: Maximum chars per chunk.
+        max_chunk_chars: Maximum characters per chunk.
         render_dpi: PNG render resolution.
         output_dir: Base directory for rendered pages and outputs.
     """
@@ -31,7 +31,7 @@ class PipelineConfig:
     confidence_threshold: float = 0.85
     max_chunk_chars: int = 1000
     render_dpi: int = 150
-    output_dir: Path = Path("outputs")
+    output_dir: Path = field(default_factory=lambda: Path("outputs"))
 
 
 class PDFPipeline:
@@ -53,13 +53,13 @@ class PDFPipeline:
         )
 
     def run(self, pdf_path: Path) -> list[Chunk]:
-        """Run the full Phase 1 pipeline on a PDF.
+        """Run the full extraction + chunking pipeline on a PDF.
 
         Args:
             pdf_path: Path to the input PDF.
 
         Returns:
-            List of Chunks ready for embedding in Phase 2.
+            List of Chunks ready for embedding.
         """
         logger.info("Pipeline starting: %s", pdf_path)
 
@@ -74,7 +74,7 @@ class PDFPipeline:
         chunks = self._chunker.chunk(pages)
 
         logger.info(
-            "Pipeline complete: %d pages, %d chunks (%.0f%% fallback)",
+            "Pipeline complete: %d pages → %d chunks (%.0f%% via fallback)",
             len(pages),
             len(chunks),
             100 * fallback_count / max(len(pages), 1),

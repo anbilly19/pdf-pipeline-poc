@@ -2,6 +2,12 @@
 
 LangSmith tracing is enabled automatically when LANGCHAIN_TRACING_V2=true
 and LANGCHAIN_API_KEY are set in the environment.
+
+Each invocation is fully isolated — no cross-turn memory. The agent only
+sees the system prompt + messages from the current question's turn
+(the last HumanMessage and any tool call/result messages that follow it).
+This prevents context contamination where prior questions bleed into the
+current query's search term generation.
 """
 from __future__ import annotations
 
@@ -9,8 +15,7 @@ import logging
 import os
 from typing import Literal
 
-from langchain_core.messages import BaseMessage
-from langgraph.checkpoint.memory import MemorySaver
+from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 from langgraph.prebuilt import ToolNode
@@ -39,9 +44,30 @@ Mandatory rules — never skip any of these:
 6. Respond in the same language the user writes in.
 """
 
+_SYSTEM_MESSAGE = SystemMessage(content=_SYSTEM_PROMPT)
+
 
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
+
+
+def _current_turn_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
+    """Extract only the current turn's messages (last HumanMessage onward).
+
+    Scans backwards to find the last HumanMessage, then returns everything
+    from that point forward. This isolates the current question from all
+    prior conversation history, preventing context contamination.
+
+    Args:
+        messages: Full accumulated message list from AgentState.
+
+    Returns:
+        Slice starting at the last HumanMessage, or all messages if none found.
+    """
+    for i in range(len(messages) - 1, -1, -1):
+        if isinstance(messages[i], HumanMessage):
+            return messages[i:]
+    return messages
 
 
 def _build_llm(provider: str, model: str, temperature: float) -> object:
@@ -77,6 +103,9 @@ def build_agent(
 ) -> object:
     """Build and compile the LangGraph ReAct agent.
 
+    Each call to the agent is fully isolated — the LLM only sees the system
+    prompt and the current question's turn, never prior questions.
+
     Args:
         retriever: Initialised BBoxRetriever.
         provider: 'openai' or 'ollama'.
@@ -84,7 +113,7 @@ def build_agent(
         temperature: Sampling temperature.
 
     Returns:
-        Compiled LangGraph graph with MemorySaver checkpointing.
+        Compiled LangGraph graph (no checkpointer — stateless per invocation).
     """
     tools = build_tools(retriever)
     llm = _build_llm(provider, model, temperature)
@@ -92,11 +121,8 @@ def build_agent(
     tool_node = ToolNode(tools)
 
     def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
-        messages = state["messages"]
-        from langchain_core.messages import SystemMessage  # noqa: PLC0415
-        if not any(isinstance(m, SystemMessage) for m in messages):
-            messages = [SystemMessage(content=_SYSTEM_PROMPT)] + messages
-        response = llm_with_tools.invoke(messages)
+        turn_messages = _current_turn_messages(state["messages"])
+        response = llm_with_tools.invoke([_SYSTEM_MESSAGE] + turn_messages)
         return {"messages": [response]}
 
     def should_continue(state: AgentState) -> Literal["tools", "end"]:
@@ -112,6 +138,9 @@ def build_agent(
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": END})
     graph.add_edge("tools", "agent")
 
-    compiled = graph.compile(checkpointer=MemorySaver())
-    logger.info("Agent compiled (provider=%s, model=%s, tracing=%s)", provider, model, os.getenv("LANGCHAIN_TRACING_V2", "false"))
+    compiled = graph.compile()  # no checkpointer — fully stateless
+    logger.info(
+        "Agent compiled (provider=%s, model=%s, tracing=%s, stateless=True)",
+        provider, model, os.getenv("LANGCHAIN_TRACING_V2", "false"),
+    )
     return compiled

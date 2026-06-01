@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import logging
 import uuid
+import warnings
+
+# suppress noisy transformers __path__ deprecation warnings
+warnings.filterwarnings("ignore", message="Accessing `__path__`", module="transformers")
+logging.getLogger("transformers").setLevel(logging.ERROR)
 
 from langchain_core.messages import HumanMessage
 
@@ -16,11 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def run_cli(model: str = "gemma4:e2b") -> None:
-    """Start an interactive CLI session with the agent.
-
-    Args:
-        model: Ollama model to use.
-    """
+    """Start an interactive CLI session with the agent."""
     embedder = ChunkEmbedder()
     store = ChromaStore()
     retriever = BBoxRetriever(store=store, embedder=embedder, top_k=5)

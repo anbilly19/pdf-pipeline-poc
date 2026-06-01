@@ -10,6 +10,9 @@ This fixes the core problem where nomic-embed-text ranks German legal
 keywords poorly: BM25 is exact-term based and always surfaces chunks
 that literally contain the query words (e.g. "Reaktionszeit", "Vertragsstrafe").
 
+Fallback: if all BM25 scores are zero (no keyword overlap), the original
+FAISS ranking is preserved so semantic results are not discarded.
+
 Dependencies: rank-bm25 (pure Python, no native libs)
 """
 from __future__ import annotations
@@ -27,8 +30,14 @@ _FAISS_MULTIPLIER = 4  # fetch 4x candidates from FAISS before BM25 rerank
 
 
 def _tokenize(text: str) -> list[str]:
-    """Simple whitespace + punctuation tokenizer for BM25."""
-    return re.findall(r"[\w\u00c0-\u024f]+", text.lower())
+    """Whitespace + punctuation tokenizer for BM25 with full German character support.
+
+    Includes:
+    - Basic Latin extended (\u00c0-\u024f) for umlauts (ä, ö, ü, Ä, Ö, Ü)
+    - ß (\u00df) explicitly included
+    - All matched tokens lowercased
+    """
+    return re.findall(r"[\w\u00c0-\u024f\u00df]+", text.lower())
 
 
 class BBoxRetriever:
@@ -70,6 +79,7 @@ class BBoxRetriever:
 
         Returns:
             List of Chunk objects ordered by hybrid relevance (best first).
+            Falls back to FAISS order when BM25 yields no keyword overlap.
         """
         k = top_k or self._top_k
         candidates_k = min(k * self._faiss_multiplier, self._store.count() or 1)
@@ -109,7 +119,10 @@ class BBoxRetriever:
     def _bm25_rerank(query: str, chunks: list[Chunk], top_k: int) -> list[Chunk]:
         """Rerank chunks using BM25 keyword scoring.
 
-        Falls back to original FAISS order if rank_bm25 is not installed.
+        Falls back to original FAISS order if:
+        - rank_bm25 is not installed, OR
+        - all BM25 scores are zero (no keyword overlap between query and candidates).
+          In that case the semantic FAISS ranking is already the best signal.
 
         Args:
             query: The search query.
@@ -130,6 +143,13 @@ class BBoxRetriever:
 
         bm25 = BM25Okapi(tokenized_corpus)
         scores = bm25.get_scores(tokenized_query)
+
+        # Semantic fallback: if BM25 finds zero keyword overlap keep FAISS order
+        if max(scores, default=0.0) <= 0.0:
+            logger.debug(
+                "BM25 all-zero scores for query %.60s — keeping FAISS order", query
+            )
+            return chunks[:top_k]
 
         ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
         return [c for _, c in ranked[:top_k]]

@@ -65,7 +65,7 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
     @tool
     def search_term(
         query: Annotated[str, "Natural language search query in German or English"],
-        top_k: Annotated[int, "Number of results to return (default 5)"] = 5,
+        top_k: Annotated[int, "Number of results to return (default 10)"] = 10,
     ) -> str:
         """Search the document for text relevant to a query.
 

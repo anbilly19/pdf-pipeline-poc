@@ -32,6 +32,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 _OLLAMA_MODELS = ["gemma4:e2b", "llama3.2:3b", "mistral:7b", "llama3.1:8b"]
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
+_DEFAULT_TOP_K = 15
 
 
 def _init_session() -> None:
@@ -65,7 +66,6 @@ def main() -> None:
             st.caption("🔍 LangSmith tracing enabled")
         st.divider()
 
-        # --- LLM provider selector ---
         provider = st.radio("LLM provider", ["ollama", "openai"], horizontal=True)
         if provider == "openai":
             model = st.selectbox("Model", _OPENAI_MODELS)
@@ -75,7 +75,6 @@ def main() -> None:
             model = st.selectbox("Model", _OLLAMA_MODELS)
 
         st.divider()
-
         uploaded = st.file_uploader("Upload a PDF", type="pdf")
 
         if uploaded and st.button("Index document", type="primary"):
@@ -88,14 +87,13 @@ def main() -> None:
             st.session_state.indexed_doc = pdf_path.stem
             st.session_state.messages = []
             st.session_state.thread_id = str(uuid.uuid4())
-            retriever = BBoxRetriever(store=store, embedder=embedder, top_k=5)
+            retriever = BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K)
             st.session_state.agent = build_agent(
                 retriever=retriever, provider=provider, model=model
             )
 
         if st.session_state.indexed_doc:
             st.info(f"Active doc: **{st.session_state.indexed_doc}**")
-
         st.divider()
         if st.button("Clear conversation"):
             st.session_state.messages = []

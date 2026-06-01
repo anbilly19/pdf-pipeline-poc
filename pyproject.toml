@@ -1,0 +1,50 @@
+[project]
+name = "pdf-pipeline-poc"
+version = "0.1.0"
+description = "Agentic PDF pipeline with bounding-box citation for German-language PDFs"
+requires-python = ">=3.11"
+dependencies = [
+    "pymupdf>=1.24",
+    "pymupdf4llm>=0.0.17",
+    "chromadb>=0.5",
+    "sentence-transformers>=3.0",
+    "langchain>=0.3",
+    "langchain-community>=0.3",
+    "ollama>=0.2",
+    "streamlit>=1.35",
+    "pillow>=10.0",
+    "pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+gpu = [
+    "magic-pdf[full]>=0.9",  # MinerU
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "ANN"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

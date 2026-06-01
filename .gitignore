@@ -1,0 +1,23 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+*.egg-info/
+
+# Data & outputs
+data/
+outputs/
+*.pdf
+*.png
+
+# Chroma DB
+chroma_db/
+
+# Env
+.env
+*.env

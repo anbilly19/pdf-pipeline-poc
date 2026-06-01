@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 import warnings
 from pathlib import Path
@@ -9,9 +10,12 @@ from pathlib import Path
 warnings.filterwarnings("ignore", message="Accessing `__path__`", module="transformers")
 logging.getLogger("transformers").setLevel(logging.ERROR)
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import streamlit as st
 
-from src.agent.graph import build_agent
+from src.agent.graph import build_agent, _DEFAULT_MODEL
 from src.indexer import DocumentIndexer
 from src.retrieval.embedder import ChunkEmbedder
 from src.retrieval.retriever import BBoxRetriever
@@ -25,6 +29,8 @@ OUTPUT_DIR = Path("outputs")
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
+
+_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 
 
 def _init_session() -> None:
@@ -48,19 +54,22 @@ def _get_shared_components() -> tuple[FAISSStore, ChunkEmbedder]:
 def main() -> None:
     st.set_page_config(page_title="PDF Q&A", page_icon="📄", layout="wide")
     _init_session()
+
+    if not os.getenv("OPENAI_API_KEY"):
+        st.error("OPENAI_API_KEY not set. Add it to your .env file.")
+        st.stop()
+
     store, embedder = _get_shared_components()
 
     with st.sidebar:
         st.title("📄 PDF Q&A")
         st.caption("Agentic document assistant with bbox citation")
+        if os.getenv("LANGCHAIN_TRACING_V2") == "true":
+            st.caption("🔍 LangSmith tracing enabled")
         st.divider()
 
         uploaded = st.file_uploader("Upload a PDF", type="pdf")
-        model = st.selectbox(
-            "Ollama model",
-            ["gemma4:e2b", "llama3.2:1b", "mistral:7b"],
-            index=0,
-        )
+        model = st.selectbox("OpenAI model", _MODELS, index=0)
 
         if uploaded and st.button("Index document", type="primary"):
             pdf_path = DATA_DIR / uploaded.name

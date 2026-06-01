@@ -33,6 +33,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 _OLLAMA_MODELS = ["gemma4:e2b", "llama3.2:3b", "mistral:7b", "llama3.1:8b"]
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
+_MAX_SOURCE_PILLS = 3
 
 
 def _init_session() -> None:
@@ -40,6 +41,7 @@ def _init_session() -> None:
         "messages": [],
         "agent": None,
         "indexed_doc": None,
+        "overlay_source": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -51,6 +53,21 @@ def _get_shared_components() -> tuple[FAISSStore, ChunkEmbedder]:
     store = FAISSStore(persist_dir=OUTPUT_DIR / "faiss_index")
     embedder = ChunkEmbedder()
     return store, embedder
+
+
+def _clear_index(store: FAISSStore) -> None:
+    """Wipe persisted FAISS index files so stale chunks from a previous
+    document cannot bleed into a freshly uploaded one."""
+    index_dir = OUTPUT_DIR / "faiss_index"
+    for f in index_dir.glob("*"):
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    # Reset in-memory state
+    store._index = None
+    store._metadata = []
+    store._texts = []
 
 
 def main() -> None:
@@ -80,11 +97,14 @@ def main() -> None:
             pdf_path = DATA_DIR / uploaded.name
             pdf_path.write_bytes(uploaded.read())
             with st.spinner("Extracting and indexing..."):
+                # Clear stale index from any previously uploaded document
+                _clear_index(store)
                 indexer = DocumentIndexer(embedder=embedder, store=store)
                 n = indexer.index(pdf_path)
             st.success(f"Indexed {n} chunks from {uploaded.name}")
             st.session_state.indexed_doc = pdf_path.stem
             st.session_state.messages = []
+            st.session_state.overlay_source = None
             retriever = BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K)
             st.session_state.agent = build_agent(
                 retriever=retriever, provider=provider, model=model
@@ -95,6 +115,7 @@ def main() -> None:
         st.divider()
         if st.button("Clear conversation"):
             st.session_state.messages = []
+            st.session_state.overlay_source = None
             st.rerun()
 
     chat_col, view_col = st.columns([3, 2])
@@ -125,8 +146,12 @@ def main() -> None:
                     st.markdown(answer)
                     sources = _extract_sources_from_messages(result["messages"])
                     if sources:
+                        # Auto-update page view to first source of new query
+                        st.session_state.overlay_source = sources[0]
                         _render_source_pills(sources, view_col)
-                st.session_state.messages.append({"role": "assistant", "content": answer, "sources": sources})
+                st.session_state.messages.append(
+                    {"role": "assistant", "content": answer, "sources": sources}
+                )
 
     with view_col:
         st.subheader("Page View")
@@ -142,11 +167,10 @@ def main() -> None:
 
 
 def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, object]]:
-    """Parse all [source: page N, bboxes=[[...], [...]]] annotations from tool messages.
+    """Parse [source: page N, bboxes=[[...]]] annotations from tool messages.
 
-    The previous regex `\[.*?\]` was non-greedy and matched only the first inner
-    list in a multi-bbox result like `[[x,y,w,h], [x,y,w,h]]`. This version
-    matches the full outer list greedily so all bboxes are captured correctly.
+    Returns at most _MAX_SOURCE_PILLS unique pages, in order of appearance.
+    Bbox regex matches the full nested list greedily to capture multi-bbox results.
     """
     from langchain_core.messages import ToolMessage  # noqa: PLC0415
     import re, ast  # noqa: PLC0415, E401
@@ -155,8 +179,13 @@ def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, obj
     for msg in messages:
         if not isinstance(msg, ToolMessage):
             continue
-        # Greedily match the full outer bbox list including nested lists
-        for match in re.finditer(r"\[source: page (\d+), bboxes=(\[\[.*?\]\])", str(msg.content), re.DOTALL):
+        for match in re.finditer(
+            r"\[source: page (\d+), bboxes=(\[\[.*?\]\])",
+            str(msg.content),
+            re.DOTALL,
+        ):
+            if len(sources) >= _MAX_SOURCE_PILLS:
+                break
             try:
                 page = int(match.group(1))
                 if page in seen_pages:
@@ -167,6 +196,8 @@ def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, obj
                 seen_pages.add(page)
             except Exception:  # noqa: BLE001
                 pass
+        if len(sources) >= _MAX_SOURCE_PILLS:
+            break
     return sources
 
 
@@ -183,10 +214,9 @@ def _render_source_pills(sources: list[dict[str, object]], view_col: object) -> 
     for i, src in enumerate(sources):
         with cols[i]:
             if st.button(f"Page {src['page']}", key=f"src_{uuid.uuid4()}"):
-                st.session_state["overlay_source"] = src
+                # Clicking a pill updates the page view
+                st.session_state.overlay_source = src
                 st.rerun()
-    if sources and "overlay_source" not in st.session_state:
-        st.session_state["overlay_source"] = sources[0]
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ dependencies = [
     "httpx>=0.28",
     "tenacity>=9.0",
     "fitz>=0.0.1.dev2",
+    "torchvision>=0.27.0",
 ]
 
 [dependency-groups]

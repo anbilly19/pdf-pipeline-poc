@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 import os
-import uuid
 import warnings
 from pathlib import Path
 
@@ -42,6 +41,7 @@ def _init_session() -> None:
         "agent": None,
         "indexed_doc": None,
         "overlay_source": None,
+        "latest_sources": [],  # sources from the most recent query
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -64,7 +64,6 @@ def _clear_index(store: FAISSStore) -> None:
             f.unlink()
         except OSError:
             pass
-    # Reset in-memory state
     store._index = None
     store._metadata = []
     store._texts = []
@@ -97,7 +96,6 @@ def main() -> None:
             pdf_path = DATA_DIR / uploaded.name
             pdf_path.write_bytes(uploaded.read())
             with st.spinner("Extracting and indexing..."):
-                # Clear stale index from any previously uploaded document
                 _clear_index(store)
                 indexer = DocumentIndexer(embedder=embedder, store=store)
                 n = indexer.index(pdf_path)
@@ -105,6 +103,7 @@ def main() -> None:
             st.session_state.indexed_doc = pdf_path.stem
             st.session_state.messages = []
             st.session_state.overlay_source = None
+            st.session_state.latest_sources = []
             retriever = BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K)
             st.session_state.agent = build_agent(
                 retriever=retriever, provider=provider, model=model
@@ -116,6 +115,7 @@ def main() -> None:
         if st.button("Clear conversation"):
             st.session_state.messages = []
             st.session_state.overlay_source = None
+            st.session_state.latest_sources = []
             st.rerun()
 
     chat_col, view_col = st.columns([3, 2])
@@ -128,8 +128,6 @@ def main() -> None:
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
-                    if msg.get("sources"):
-                        _render_source_pills(msg["sources"], view_col)
 
             if prompt := st.chat_input("Ask a question about the document..."):
                 st.session_state.messages.append({"role": "user", "content": prompt})
@@ -144,17 +142,31 @@ def main() -> None:
                         last = result["messages"][-1]
                         answer = last.content
                     st.markdown(answer)
-                    sources = _extract_sources_from_messages(result["messages"])
-                    if sources:
-                        # Auto-update page view to first source of new query
-                        st.session_state.overlay_source = sources[0]
-                        _render_source_pills(sources, view_col)
+                sources = _extract_sources_from_messages(result["messages"])
+                # Store latest sources and auto-show first one in page view
+                st.session_state.latest_sources = sources
+                if sources:
+                    st.session_state.overlay_source = sources[0]
                 st.session_state.messages.append(
                     {"role": "assistant", "content": answer, "sources": sources}
                 )
+                st.rerun()
 
+    # view_col: rendered once per page load with stable button keys
     with view_col:
         st.subheader("Page View")
+
+        # Source pills — stable keys based on index, not uuid
+        latest_sources = st.session_state.get("latest_sources", [])
+        if latest_sources:
+            st.caption("Sources (latest query):")
+            cols = st.columns(len(latest_sources))
+            for i, src in enumerate(latest_sources):
+                with cols[i]:
+                    if st.button(f"Page {src['page']}", key=f"pill_{i}"):
+                        st.session_state.overlay_source = src
+                        st.rerun()
+
         src = st.session_state.get("overlay_source")
         if src:
             img = render_page_with_bboxes(str(src["image_path"]), src["bboxes"])
@@ -170,7 +182,6 @@ def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, obj
     """Parse [source: page N, bboxes=[[...]]] annotations from tool messages.
 
     Returns at most _MAX_SOURCE_PILLS unique pages, in order of appearance.
-    Bbox regex matches the full nested list greedily to capture multi-bbox results.
     """
     from langchain_core.messages import ToolMessage  # noqa: PLC0415
     import re, ast  # noqa: PLC0415, E401
@@ -204,19 +215,6 @@ def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, obj
 def _find_image_path(page_number: int) -> str:
     path = OUTPUT_DIR / "pages" / f"page_{page_number:04d}.png"
     return str(path) if path.exists() else ""
-
-
-def _render_source_pills(sources: list[dict[str, object]], view_col: object) -> None:
-    if not sources:
-        return
-    st.caption("Sources:")
-    cols = st.columns(len(sources))
-    for i, src in enumerate(sources):
-        with cols[i]:
-            if st.button(f"Page {src['page']}", key=f"src_{uuid.uuid4()}"):
-                # Clicking a pill updates the page view
-                st.session_state.overlay_source = src
-                st.rerun()
 
 
 if __name__ == "__main__":

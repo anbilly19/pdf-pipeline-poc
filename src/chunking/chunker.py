@@ -5,17 +5,30 @@ Design rules (from CLAUDE.md):
 - Preserve table elements as single chunks (no splitting mid-table).
 - Respect heading boundaries — a heading always starts a new chunk.
 - Chunks do not cross page boundaries.
+- Filter out noise: short fragments, repeated page headers/footers.
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, field
 
 from src.models import Chunk, Element, Page
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CHARS = 1000
+_MIN_CHUNK_CHARS = 50  # discard chunks shorter than this
+
+# Patterns that match typical PDF header/footer noise
+_NOISE_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(r"^Seite\s+\d+\s+von\s+\d+", re.IGNORECASE),
+    re.compile(r"^Version\s+\d+\.\d+\s+vom", re.IGNORECASE),
+    re.compile(r"^Die mit \* gekennzeichneten", re.IGNORECASE),
+    re.compile(r"^Vertragsnummer.{0,40}$"),
+    re.compile(r"^\s*_+\s*$"),  # lines of underscores
+]
+
 _HEADING_HEURISTICS = (
     lambda e: len(e.text) < 120 and e.text.isupper(),
     lambda e: len(e.text) < 120 and e.text.endswith(":"),
@@ -29,10 +42,14 @@ class ChunkerConfig:
     Args:
         max_chars: Maximum character count per chunk before forcing a split.
         overlap_chars: Character overlap between consecutive text chunks.
+        min_chunk_chars: Minimum characters for a chunk to be kept.
+        deduplicate: Drop exact-duplicate chunks across the document.
     """
 
     max_chars: int = _DEFAULT_MAX_CHARS
     overlap_chars: int = 100
+    min_chunk_chars: int = _MIN_CHUNK_CHARS
+    deduplicate: bool = True
 
 
 class LayoutChunker:
@@ -43,7 +60,7 @@ class LayoutChunker:
     - a table element is encountered (emitted as its own chunk)
     - accumulated text exceeds max_chars (hard split)
 
-    Bounding boxes from all contributing elements are aggregated onto each chunk.
+    Short, noisy, and duplicate chunks are filtered out.
 
     Args:
         config: Chunker configuration.
@@ -64,18 +81,16 @@ class LayoutChunker:
         chunks: list[Chunk] = []
         for page in pages:
             chunks.extend(self._chunk_page(page))
-        logger.info("Chunked %d pages into %d chunks", len(pages), len(chunks))
+
+        before = len(chunks)
+        chunks = self._filter(chunks)
+        logger.info(
+            "Chunked %d pages into %d chunks (%d filtered out)",
+            len(pages), len(chunks), before - len(chunks),
+        )
         return chunks
 
     def _chunk_page(self, page: Page) -> list[Chunk]:
-        """Chunk a single page's elements.
-
-        Args:
-            page: The page to chunk.
-
-        Returns:
-            List of Chunk objects for this page.
-        """
         chunks: list[Chunk] = []
         buffer_texts: list[str] = []
         buffer_bboxes: list[list[float]] = []
@@ -100,6 +115,9 @@ class LayoutChunker:
             buffer_confidence.clear()
 
         for element in page.elements:
+            if _is_noise(element.text):
+                continue
+
             if element.type == "table":
                 flush()
                 chunks.append(
@@ -128,14 +146,30 @@ class LayoutChunker:
         flush()
         return chunks
 
+    def _filter(self, chunks: list[Chunk]) -> list[Chunk]:
+        """Remove short and duplicate chunks."""
+        seen: set[str] = set()
+        out: list[Chunk] = []
+        for c in chunks:
+            stripped = c.text.strip()
+            if len(stripped) < self._cfg.min_chunk_chars:
+                continue
+            if self._cfg.deduplicate:
+                key = re.sub(r"\s+", " ", stripped.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+            out.append(c)
+        return out
+
     @staticmethod
     def _is_heading(element: Element) -> bool:
-        """Heuristically detect heading elements.
-
-        Args:
-            element: The element to test.
-
-        Returns:
-            True if the element is likely a heading.
-        """
         return any(h(element) for h in _HEADING_HEURISTICS)
+
+
+def _is_noise(text: str) -> bool:
+    """Return True if the text matches known header/footer noise patterns."""
+    t = text.strip()
+    if not t:
+        return True
+    return any(p.search(t) for p in _NOISE_PATTERNS)

@@ -2,12 +2,12 @@
 name = "pdf-pipeline-poc"
 version = "0.1.0"
 description = "Agentic PDF pipeline with bounding-box citation for German-language PDFs"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"
 dependencies = [
     # PDF extraction
-    "pymupdf>=1.25",
+    "pymupdf>=1.24.9,<1.25.0",             # pinned: magic-pdf[full] requires <1.25
     "pymupdf4llm>=0.0.17",
-    "pdfmux>=0.3",                         # primary extractor — smart router
+    "pdfmux>=0.3",
 
     # Embeddings & vector store
     "sentence-transformers>=3.3",
@@ -16,9 +16,9 @@ dependencies = [
     # LangChain / LangGraph agentic stack
     "langchain>=0.3.20",
     "langchain-community>=0.3.20",
-    "langchain-ollama>=0.3",               # Ollama chat model integration
-    "langgraph>=0.3",                      # ReAct agent loop
-    "langgraph-checkpoint>=2.0",           # conversation memory / checkpointing
+    "langchain-ollama>=0.3",
+    "langgraph>=0.3",
+    "langgraph-checkpoint>=2.0",
 
     # Local LLM
     "ollama>=0.4",
@@ -30,24 +30,16 @@ dependencies = [
     "pillow>=11.0",
     "pydantic>=2.10",
     "httpx>=0.28",
-    "tenacity>=9.0",                       # retry logic for flaky parsers
+    "tenacity>=9.0",
 ]
 
 [project.optional-dependencies]
 gpu = [
-    "magic-pdf[full]>=1.3",               # MinerU VLM fallback
-]
-dev = [
-    "pytest>=8.3",
-    "pytest-cov>=6.0",
-    "pytest-asyncio>=0.24",
-    "ruff>=0.9",
-    "mypy>=1.14",
-    "types-pillow",
+    "magic-pdf[full]>=1.3",               # MinerU VLM fallback; requires pymupdf<1.25 (already pinned above)
 ]
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
     "pytest>=8.3",
     "pytest-cov>=6.0",
     "pytest-asyncio>=0.24",

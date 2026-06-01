@@ -15,7 +15,7 @@ load_dotenv()
 
 import streamlit as st
 
-from src.agent.graph import build_agent, _DEFAULT_MODEL
+from src.agent.graph import build_agent
 from src.indexer import DocumentIndexer
 from src.retrieval.embedder import ChunkEmbedder
 from src.retrieval.retriever import BBoxRetriever

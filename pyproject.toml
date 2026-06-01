@@ -7,19 +7,19 @@ dependencies = [
     # PDF extraction
     "pymupdf>=1.24.9,<1.25.0",             # pinned: pymupdf-layout requires >=1.24
     "pymupdf4llm>=0.0.17",
-    "pymupdf-layout>=1.0",                 # CPU-only layout parser, 10x faster than VLM, replaces magic-pdf
+    "pymupdf-layout>=1.0",                 # CPU-only layout parser, replaces GPU magic-pdf
     "pdfmux>=0.3",                         # primary extractor — smart router
 
     # Embeddings & vector store
     "sentence-transformers>=3.3",
     "chromadb>=0.6",
 
-    # LangChain 1.0 / LangGraph 1.0
-    "langchain>=1.0",
-    "langchain-community>=1.0",
-    "langchain-ollama>=0.3",
-    "langgraph>=1.0",
+    # LangGraph 1.2.2 / LangChain 1.3.2 (latest stable as of June 2026)
+    "langgraph>=1.2.2",
     "langgraph-checkpoint>=2.0",
+    "langchain>=1.3.2",
+    "langchain-community>=0.4.2",          # 0.4.x is latest stable; 1.0 never shipped (sunsetting)
+    "langchain-ollama>=0.3",
 
     # Local LLM
     "ollama>=0.4",
@@ -33,9 +33,6 @@ dependencies = [
     "httpx>=0.28",
     "tenacity>=9.0",
 ]
-
-# No gpu extra — pymupdf-layout handles complex layouts on CPU.
-# If you later need VLM-grade accuracy: install magic-pdf separately in its own venv.
 
 [dependency-groups]
 dev = [

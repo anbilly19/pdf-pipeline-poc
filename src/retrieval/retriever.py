@@ -3,9 +3,9 @@ from __future__ import annotations
 
 import logging
 
-from src.models import Chunk, QAResponse, Source
+from src.models import Chunk, Source
 from src.retrieval.embedder import ChunkEmbedder
-from src.retrieval.store import ChromaStore
+from src.retrieval.store import FAISSStore
 
 logger = logging.getLogger(__name__)
 
@@ -14,14 +14,14 @@ class BBoxRetriever:
     """Retrieves top-k chunks for a query, preserving full bbox metadata.
 
     Args:
-        store: Initialised ChromaStore.
+        store: Initialised FAISSStore.
         embedder: Initialised ChunkEmbedder.
         top_k: Default number of results to retrieve.
     """
 
     def __init__(
         self,
-        store: ChromaStore,
+        store: FAISSStore,
         embedder: ChunkEmbedder,
         top_k: int = 5,
     ) -> None:
@@ -39,7 +39,7 @@ class BBoxRetriever:
         """Retrieve the most relevant chunks for a query.
 
         Args:
-            query: Natural language question (German or English).
+            query: Natural language question.
             top_k: Override default result count.
             filter_doc_id: Restrict search to a single document.
             filter_chunk_type: Restrict to 'text', 'table', or 'figure'.

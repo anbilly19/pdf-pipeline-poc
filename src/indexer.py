@@ -1,6 +1,6 @@
-"""Document indexer: runs the full pipeline and stores chunks in Chroma.
+"""Document indexer: runs the full pipeline and stores chunks in FAISS.
 
-This is the write path. The read path (retrieval) goes through BBoxRetriever.
+Write path. Read path goes through BBoxRetriever.
 """
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from src.pipeline import PDFPipeline, PipelineConfig
 from src.retrieval.embedder import ChunkEmbedder
-from src.retrieval.store import ChromaStore
+from src.retrieval.store import FAISSStore
 
 logger = logging.getLogger(__name__)
 
@@ -20,18 +20,18 @@ class DocumentIndexer:
     Args:
         pipeline_config: Configuration for extraction and chunking.
         embedder: Embedder instance.
-        store: Chroma store instance.
+        store: FAISS store instance.
     """
 
     def __init__(
         self,
         pipeline_config: PipelineConfig | None = None,
         embedder: ChunkEmbedder | None = None,
-        store: ChromaStore | None = None,
+        store: FAISSStore | None = None,
     ) -> None:
         self._pipeline = PDFPipeline(config=pipeline_config)
         self._embedder = embedder or ChunkEmbedder()
-        self._store = store or ChromaStore()
+        self._store = store or FAISSStore()
 
     def index(self, pdf_path: Path, doc_id: str | None = None) -> int:
         """Index a PDF document end-to-end.

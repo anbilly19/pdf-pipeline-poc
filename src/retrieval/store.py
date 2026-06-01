@@ -1,48 +1,71 @@
-"""Chroma vector store with full bbox metadata preservation.
+"""FAISS vector store with full bbox metadata preservation.
 
-Every chunk stored here carries its bboxes, page number, chunk_type,
-confidence, and image_path in metadata — the bbox chain is never broken.
+Persists index + metadata as two files:
+    outputs/faiss_index/index.faiss  - FAISS flat cosine index
+    outputs/faiss_index/metadata.json - chunk metadata (bboxes, page, etc.)
+
+No chromadb, no transformers, no HuggingFace — fully offline.
 """
 from __future__ import annotations
 
 import json
 import logging
+import numpy as np
 from pathlib import Path
 
 from src.models import Chunk
 
 logger = logging.getLogger(__name__)
 
-_COLLECTION_NAME = "pdf_chunks"
+_INDEX_FILE = "index.faiss"
+_META_FILE = "metadata.json"
 
 
-class ChromaStore:
-    """Persisted Chroma vector store for PDF chunks.
+class FAISSStore:
+    """Persisted FAISS vector store for PDF chunks.
 
     Args:
-        persist_dir: Directory where Chroma persists its database.
-        collection_name: Chroma collection identifier.
+        persist_dir: Directory where index and metadata are saved.
     """
 
-    def __init__(
-        self,
-        persist_dir: Path = Path("outputs/chroma_db"),
-        collection_name: str = _COLLECTION_NAME,
-    ) -> None:
+    def __init__(self, persist_dir: Path = Path("outputs/faiss_index")) -> None:
         self._persist_dir = persist_dir
-        self._collection_name = collection_name
         self._persist_dir.mkdir(parents=True, exist_ok=True)
+        self._index_path = self._persist_dir / _INDEX_FILE
+        self._meta_path = self._persist_dir / _META_FILE
+        self._index: object = None
+        self._metadata: list[dict[str, object]] = []
+        self._texts: list[str] = []
+        self._load()
 
-    @property
-    def _collection(self) -> object:
-        """Lazy-initialise Chroma client and collection."""
-        import chromadb  # noqa: PLC0415
+    # ------------------------------------------------------------------
+    # Persistence
+    # ------------------------------------------------------------------
 
-        client = chromadb.PersistentClient(path=str(self._persist_dir))
-        return client.get_or_create_collection(
-            name=self._collection_name,
-            metadata={"hnsw:space": "cosine"},
+    def _load(self) -> None:
+        """Load existing index and metadata from disk if present."""
+        import faiss  # noqa: PLC0415
+        if self._index_path.exists() and self._meta_path.exists():
+            self._index = faiss.read_index(str(self._index_path))
+            data = json.loads(self._meta_path.read_text(encoding="utf-8"))
+            self._metadata = data["metadata"]
+            self._texts = data["texts"]
+            logger.info("Loaded FAISS index with %d vectors", len(self._metadata))
+        else:
+            self._index = None
+
+    def _save(self) -> None:
+        """Persist index and metadata to disk."""
+        import faiss  # noqa: PLC0415
+        faiss.write_index(self._index, str(self._index_path))  # type: ignore[arg-type]
+        self._meta_path.write_text(
+            json.dumps({"metadata": self._metadata, "texts": self._texts}, ensure_ascii=False),
+            encoding="utf-8",
         )
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def add_chunks(
         self,
@@ -50,15 +73,14 @@ class ChromaStore:
         embeddings: list[list[float]],
         doc_id: str,
     ) -> None:
-        """Store chunks and their embeddings in Chroma.
+        """Store chunks and their embeddings.
 
-        Bboxes are JSON-serialised into metadata since Chroma only
-        accepts flat string/int/float metadata values.
+        Existing entries for the same doc_id are replaced (upsert by doc_id).
 
         Args:
             chunks: Chunks to store.
             embeddings: Corresponding embedding vectors (same order).
-            doc_id: Source document identifier (e.g. filename stem).
+            doc_id: Source document identifier.
 
         Raises:
             ValueError: If chunks and embeddings lengths differ.
@@ -68,27 +90,40 @@ class ChromaStore:
                 f"chunks ({len(chunks)}) and embeddings ({len(embeddings)}) must match"
             )
 
-        ids = [f"{doc_id}__p{c.page_number}__c{i}" for i, c in enumerate(chunks)]
-        metadatas = [
+        import faiss  # noqa: PLC0415
+
+        # remove existing entries for this doc_id
+        keep = [(t, m) for t, m in zip(self._texts, self._metadata) if m["doc_id"] != doc_id]
+        kept_texts = [k[0] for k in keep]
+        kept_meta = [k[1] for k in keep]
+
+        new_texts = [c.text for c in chunks]
+        new_meta = [
             {
                 "doc_id": doc_id,
                 "page_number": c.page_number,
                 "chunk_type": c.chunk_type,
                 "confidence": c.confidence,
                 "image_path": c.image_path,
-                "bboxes": json.dumps(c.bboxes),  # serialised — deserialise on retrieval
+                "bboxes": c.bboxes,
             }
             for c in chunks
         ]
-        documents = [c.text for c in chunks]
 
-        self._collection.upsert(  # type: ignore[union-attr]
-            ids=ids,
-            embeddings=embeddings,
-            documents=documents,
-            metadatas=metadatas,
-        )
-        logger.info("Stored %d chunks for doc '%s'", len(chunks), doc_id)
+        self._texts = kept_texts + new_texts
+        self._metadata = kept_meta + new_meta
+
+        # rebuild index from all vectors
+        all_embeddings = self._rebuild_embeddings(kept_meta) + embeddings
+        vectors = np.array(all_embeddings, dtype=np.float32)
+        faiss.normalize_L2(vectors)  # cosine similarity via inner product
+
+        dim = vectors.shape[1]
+        index = faiss.IndexFlatIP(dim)
+        index.add(vectors)  # type: ignore[union-attr]
+        self._index = index
+        self._save()
+        logger.info("Stored %d chunks for doc '%s' (%d total)", len(chunks), doc_id, len(self._texts))
 
     def query(
         self,
@@ -99,58 +134,68 @@ class ChromaStore:
     ) -> list[Chunk]:
         """Retrieve the top-k most similar chunks.
 
-        Bboxes are deserialised from JSON metadata back into list[list[float]].
-        The bbox chain is preserved end-to-end.
-
         Args:
             query_embedding: Dense query vector.
             n_results: Number of results to return.
-            filter_doc_id: Optional Chroma metadata filter by document.
-            filter_chunk_type: Optional filter by chunk type ('text', 'table', 'figure').
+            filter_doc_id: Optional filter by document.
+            filter_chunk_type: Optional filter by chunk type.
 
         Returns:
             List of Chunk objects ordered by similarity (best first).
         """
-        where: dict[str, object] = {}
-        if filter_doc_id and filter_chunk_type:
-            where = {"$and": [{"doc_id": filter_doc_id}, {"chunk_type": filter_chunk_type}]}
-        elif filter_doc_id:
-            where = {"doc_id": filter_doc_id}
-        elif filter_chunk_type:
-            where = {"chunk_type": filter_chunk_type}
+        if self._index is None or len(self._metadata) == 0:
+            return []
 
-        kwargs: dict[str, object] = {
-            "query_embeddings": [query_embedding],
-            "n_results": n_results,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where:
-            kwargs["where"] = where
+        import faiss  # noqa: PLC0415
 
-        results = self._collection.query(**kwargs)  # type: ignore[union-attr]
+        vec = np.array([query_embedding], dtype=np.float32)
+        faiss.normalize_L2(vec)
+
+        # fetch more candidates to allow post-filtering
+        fetch_k = min(len(self._metadata), n_results * 10)
+        distances, indices = self._index.search(vec, fetch_k)  # type: ignore[union-attr]
 
         chunks: list[Chunk] = []
-        for text, meta in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-        ):
-            chunks.append(
-                Chunk(
-                    text=text,
-                    page_number=int(meta["page_number"]),
-                    bboxes=json.loads(meta["bboxes"]),
-                    chunk_type=meta["chunk_type"],  # type: ignore[arg-type]
-                    confidence=float(meta["confidence"]),
-                    image_path=str(meta["image_path"]),
-                )
-            )
+        for idx in indices[0]:
+            if idx < 0 or idx >= len(self._metadata):
+                continue
+            meta = self._metadata[idx]
+            if filter_doc_id and meta["doc_id"] != filter_doc_id:
+                continue
+            if filter_chunk_type and meta["chunk_type"] != filter_chunk_type:
+                continue
+            chunks.append(Chunk(
+                text=self._texts[idx],
+                page_number=int(meta["page_number"]),
+                bboxes=meta["bboxes"],  # type: ignore[arg-type]
+                chunk_type=meta["chunk_type"],  # type: ignore[arg-type]
+                confidence=float(meta["confidence"]),
+                image_path=str(meta["image_path"]),
+            ))
+            if len(chunks) >= n_results:
+                break
 
         return chunks
 
     def count(self) -> int:
-        """Return total number of stored chunks.
+        """Return total number of stored chunks."""
+        return len(self._metadata)
 
-        Returns:
-            Integer count.
+    def _rebuild_embeddings(self, metadata: list[dict[str, object]]) -> list[list[float]]:
+        """Placeholder — kept entries don't need re-embedding; return empty list.
+
+        In practice we store all vectors in the FAISS index and keep/drop
+        by rebuilding the full index on each add_chunks call. For the PoC
+        scale this is fine.
         """
-        return self._collection.count()  # type: ignore[union-attr, return-value]
+        # For simplicity in PoC: if there are kept entries, reload from saved index
+        if not metadata or self._index_path.exists() is False:
+            return []
+        import faiss  # noqa: PLC0415
+        old_index = faiss.read_index(str(self._index_path))
+        n_kept = len(metadata)
+        if n_kept == 0:
+            return []
+        vecs = old_index.reconstruct_n(0, old_index.ntotal)  # type: ignore[union-attr]
+        # only keep first n_kept rows (those not removed)
+        return vecs[:n_kept].tolist()

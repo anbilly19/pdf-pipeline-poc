@@ -28,6 +28,8 @@ dependencies = [
     "fitz>=0.0.1.dev2",
     "torchvision>=0.27.0",
     "faiss-cpu>=1.14.2",
+    "langchain-openai>=1.2.2",
+    "python-dotenv>=1.2.2",
 ]
 
 [dependency-groups]

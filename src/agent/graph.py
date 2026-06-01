@@ -1,10 +1,4 @@
-"""LangGraph ReAct agent graph — OpenAI LLM + LangSmith tracing.
-
-Builds a compiled StateGraph with:
-  - tool_node: executes bound tools
-  - agent_node: ChatOpenAI with tools bound
-  - conditional edge: loop until no more tool calls
-  - MemorySaver checkpoint: preserves conversation across turns
+"""LangGraph ReAct agent graph — supports OpenAI and Ollama at runtime.
 
 LangSmith tracing is enabled automatically when LANGCHAIN_TRACING_V2=true
 and LANGCHAIN_API_KEY are set in the environment.
@@ -16,7 +10,6 @@ import os
 from typing import Literal
 
 from langchain_core.messages import BaseMessage
-from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -39,42 +32,59 @@ Rules:
 - Respond in the same language the user writes in.
 """
 
-_DEFAULT_MODEL = "gpt-4o-mini"
-
 
 class AgentState(TypedDict):
-    """State schema for the ReAct agent graph."""
-
     messages: Annotated[list[BaseMessage], add_messages]
+
+
+def _build_llm(provider: str, model: str, temperature: float) -> object:
+    """Instantiate the correct LLM based on provider.
+
+    Args:
+        provider: 'openai' or 'ollama'.
+        model: Model identifier.
+        temperature: Sampling temperature.
+
+    Returns:
+        LangChain chat model instance.
+    """
+    if provider == "openai":
+        from langchain_openai import ChatOpenAI  # noqa: PLC0415
+        return ChatOpenAI(
+            model=model,
+            temperature=temperature,
+            api_key=os.environ["OPENAI_API_KEY"],
+        )
+    elif provider == "ollama":
+        from langchain_ollama import ChatOllama  # noqa: PLC0415
+        return ChatOllama(model=model, temperature=temperature)
+    else:
+        raise ValueError(f"Unknown provider: {provider!r}. Use 'openai' or 'ollama'.")
 
 
 def build_agent(
     retriever: BBoxRetriever,
-    model: str = _DEFAULT_MODEL,
+    provider: str = "ollama",
+    model: str = "gemma4:e2b",
     temperature: float = 0.1,
 ) -> object:
     """Build and compile the LangGraph ReAct agent.
 
     Args:
-        retriever: Initialised BBoxRetriever connected to the vector store.
-        model: OpenAI model identifier.
-        temperature: LLM sampling temperature.
+        retriever: Initialised BBoxRetriever.
+        provider: 'openai' or 'ollama'.
+        model: Model identifier matching the provider.
+        temperature: Sampling temperature.
 
     Returns:
         Compiled LangGraph graph with MemorySaver checkpointing.
     """
     tools = build_tools(retriever)
-
-    llm = ChatOpenAI(
-        model=model,
-        temperature=temperature,
-        api_key=os.environ["OPENAI_API_KEY"],
-    )
-    llm_with_tools = llm.bind_tools(tools)
+    llm = _build_llm(provider, model, temperature)
+    llm_with_tools = llm.bind_tools(tools)  # type: ignore[union-attr]
     tool_node = ToolNode(tools)
 
     def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
-        """Invoke the LLM with the current message history."""
         messages = state["messages"]
         from langchain_core.messages import SystemMessage  # noqa: PLC0415
         if not any(isinstance(m, SystemMessage) for m in messages):
@@ -83,7 +93,6 @@ def build_agent(
         return {"messages": [response]}
 
     def should_continue(state: AgentState) -> Literal["tools", "end"]:
-        """Route to tools if the LLM made tool calls, else end."""
         last = state["messages"][-1]
         if hasattr(last, "tool_calls") and last.tool_calls:
             return "tools"
@@ -96,7 +105,6 @@ def build_agent(
     graph.add_conditional_edges("agent", should_continue, {"tools": "tools", "end": END})
     graph.add_edge("tools", "agent")
 
-    checkpointer = MemorySaver()
-    compiled = graph.compile(checkpointer=checkpointer)
-    logger.info("Agent graph compiled (model=%s, tracing=%s)", model, os.getenv("LANGCHAIN_TRACING_V2", "false"))
+    compiled = graph.compile(checkpointer=MemorySaver())
+    logger.info("Agent compiled (provider=%s, model=%s, tracing=%s)", provider, model, os.getenv("LANGCHAIN_TRACING_V2", "false"))
     return compiled

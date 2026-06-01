@@ -30,18 +30,20 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
+_OLLAMA_MODELS = ["gemma4:e2b", "llama3.2:3b", "mistral:7b", "llama3.1:8b"]
+_OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 
 
 def _init_session() -> None:
-    if "thread_id" not in st.session_state:
-        st.session_state.thread_id = str(uuid.uuid4())
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    if "agent" not in st.session_state:
-        st.session_state.agent = None
-    if "indexed_doc" not in st.session_state:
-        st.session_state.indexed_doc = None
+    defaults = {
+        "thread_id": str(uuid.uuid4()),
+        "messages": [],
+        "agent": None,
+        "indexed_doc": None,
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
 
 
 @st.cache_resource
@@ -54,11 +56,6 @@ def _get_shared_components() -> tuple[FAISSStore, ChunkEmbedder]:
 def main() -> None:
     st.set_page_config(page_title="PDF Q&A", page_icon="📄", layout="wide")
     _init_session()
-
-    if not os.getenv("OPENAI_API_KEY"):
-        st.error("OPENAI_API_KEY not set. Add it to your .env file.")
-        st.stop()
-
     store, embedder = _get_shared_components()
 
     with st.sidebar:
@@ -68,8 +65,18 @@ def main() -> None:
             st.caption("🔍 LangSmith tracing enabled")
         st.divider()
 
+        # --- LLM provider selector ---
+        provider = st.radio("LLM provider", ["ollama", "openai"], horizontal=True)
+        if provider == "openai":
+            model = st.selectbox("Model", _OPENAI_MODELS)
+            if not os.getenv("OPENAI_API_KEY"):
+                st.warning("OPENAI_API_KEY not set in .env")
+        else:
+            model = st.selectbox("Model", _OLLAMA_MODELS)
+
+        st.divider()
+
         uploaded = st.file_uploader("Upload a PDF", type="pdf")
-        model = st.selectbox("OpenAI model", _MODELS, index=0)
 
         if uploaded and st.button("Index document", type="primary"):
             pdf_path = DATA_DIR / uploaded.name
@@ -82,10 +89,13 @@ def main() -> None:
             st.session_state.messages = []
             st.session_state.thread_id = str(uuid.uuid4())
             retriever = BBoxRetriever(store=store, embedder=embedder, top_k=5)
-            st.session_state.agent = build_agent(retriever=retriever, model=model)
+            st.session_state.agent = build_agent(
+                retriever=retriever, provider=provider, model=model
+            )
 
         if st.session_state.indexed_doc:
             st.info(f"Active doc: **{st.session_state.indexed_doc}**")
+
         st.divider()
         if st.button("Clear conversation"):
             st.session_state.messages = []

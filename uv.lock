@@ -1948,6 +1948,15 @@ wheels = [
 ]
 
 [[package]]
+name = "opendataloader-pdf"
+version = "2.4.7"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1d/5a/98cd2079f2828f7886ee447eae21ee60a858930596aebcc8d275a1fe2b12/opendataloader_pdf-2.4.7.tar.gz", hash = "sha256:a16e995f2f526d706045218d9e359a31f50371a0bc0e3bb1bc15abb467c08fb7", size = 22554865, upload-time = "2026-05-27T10:04:54.285Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b7/14/f897eabf04eab4e6a40dce9214d921558165f3eaed68335892a5b1a004d0/opendataloader_pdf-2.4.7-py3-none-any.whl", hash = "sha256:1c359183650f4c012875010c156f13b6d3477b00762b8e3fbd8479fa03feb628", size = 22568934, upload-time = "2026-05-27T10:04:49.902Z" },
+]
+
+[[package]]
 name = "orjson"
 version = "3.11.9"
 source = { registry = "https://pypi.org/simple" }
@@ -2133,6 +2142,7 @@ dependencies = [
     { name = "langgraph" },
     { name = "langgraph-checkpoint" },
     { name = "ollama" },
+    { name = "opendataloader-pdf" },
     { name = "pdfmux" },
     { name = "pillow" },
     { name = "pydantic" },
@@ -2166,6 +2176,7 @@ requires-dist = [
     { name = "langgraph", specifier = ">=1.2.2" },
     { name = "langgraph-checkpoint", specifier = ">=2.0" },
     { name = "ollama", specifier = ">=0.4" },
+    { name = "opendataloader-pdf", specifier = ">=2.4.7" },
     { name = "pdfmux", specifier = ">=0.3" },
     { name = "pillow", specifier = ">=11.0" },
     { name = "pydantic", specifier = ">=2.10" },

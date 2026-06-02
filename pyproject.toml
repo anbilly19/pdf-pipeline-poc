@@ -30,6 +30,7 @@ dependencies = [
     "faiss-cpu>=1.14.2",
     "langchain-openai>=1.2.2",
     "python-dotenv>=1.2.2",
+    "opendataloader-pdf>=2.4.7",
 ]
 
 [dependency-groups]

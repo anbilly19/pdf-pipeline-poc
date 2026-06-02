@@ -1,11 +1,12 @@
 """Tests for extraction layer."""
 from __future__ import annotations
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from src.extraction.base import BaseExtractor
+from src.extraction.base import BaseExtractor, ExtractionError
 from src.models import Element, Page
 
 
@@ -48,11 +49,10 @@ def test_extract_safe_returns_none_on_error() -> None:
     """extract_safe must return None (not raise) when extraction fails."""
     class BrokenExtractor(BaseExtractor):
         def extract(self, pdf_path: object) -> list[Page]:  # type: ignore[override]
-            from src.extraction.base import ExtractionError
             raise ExtractionError("broken")
 
     extractor = BrokenExtractor()
-    result = extractor.extract_safe("nonexistent.pdf")  # type: ignore[arg-type]
+    result = extractor.extract_safe(Path("nonexistent.pdf"))
     assert result is None
 
 
@@ -112,8 +112,18 @@ def test_page_with_elements() -> None:
 # PyMuPDFExtractor (mocked fitz)
 # ---------------------------------------------------------------------------
 
+def test_pymupdf_extractor_missing_file_raises() -> None:
+    """Extracting a non-existent PDF must raise ExtractionError."""
+    from src.extraction.pymupdf_extractor import PyMuPDFExtractor
+    extractor = PyMuPDFExtractor()
+    with pytest.raises(ExtractionError):
+        extractor.extract(Path("does_not_exist.pdf"))
+
+
 def test_pymupdf_extractor_skips_short_spans() -> None:
     """Text blocks shorter than 3 chars should be dropped."""
+    from src.extraction.pymupdf_extractor import PyMuPDFExtractor
+
     with patch("src.extraction.pymupdf_extractor.fitz") as mock_fitz:
         mock_doc = MagicMock()
         mock_page = MagicMock()
@@ -128,7 +138,7 @@ def test_pymupdf_extractor_skips_short_spans() -> None:
                     "lines": [
                         {
                             "spans": [
-                                {"text": "Hi"},    # too short — should be dropped
+                                {"text": "Hi"},          # too short
                                 {"text": "Hello world"},
                             ]
                         }
@@ -139,13 +149,10 @@ def test_pymupdf_extractor_skips_short_spans() -> None:
         mock_fitz.open.return_value = mock_doc
         mock_fitz.TEXT_PRESERVE_WHITESPACE = 0
 
-        from src.extraction.pymupdf_extractor import PyMuPDFExtractor
-        import importlib
-        import src.extraction.pymupdf_extractor as mod
-        importlib.reload(mod)
-
-        extractor = mod.PyMuPDFExtractor()
-        pages = extractor.extract("dummy.pdf")  # type: ignore[arg-type]
+        # Patch exists() so the path check passes
+        with patch.object(Path, "exists", return_value=True):
+            extractor = PyMuPDFExtractor()
+            pages = extractor.extract(Path("dummy.pdf"))
 
         texts = [el.text for p in pages for el in p.elements]
         assert "Hello world" in texts

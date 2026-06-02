@@ -85,6 +85,7 @@ def test_retriever_calls_embedder_and_store() -> None:
     mock_store = MagicMock(spec=FAISSStore)
     mock_embedder = MagicMock(spec=ChunkEmbedder)
     mock_embedder.embed_query.return_value = [0.1] * 384
+    mock_store.count.return_value = 10  # must return int
     mock_store.query.return_value = [_make_chunk("result")]
     retriever = BBoxRetriever(store=mock_store, embedder=mock_embedder, top_k=3)
     results = retriever.retrieve("What is the topic?")
@@ -98,6 +99,7 @@ def test_retriever_as_sources_preserves_bboxes() -> None:
     mock_store = MagicMock(spec=FAISSStore)
     mock_embedder = MagicMock(spec=ChunkEmbedder)
     mock_embedder.embed_query.return_value = [0.0] * 384
+    mock_store.count.return_value = 10  # must return int
     mock_store.query.return_value = [_make_chunk(bboxes=bboxes, page=3)]
     retriever = BBoxRetriever(store=mock_store, embedder=mock_embedder)
     sources = retriever.retrieve_as_sources("Question")

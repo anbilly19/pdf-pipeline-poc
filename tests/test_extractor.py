@@ -120,8 +120,14 @@ def test_pymupdf_extractor_missing_file_raises() -> None:
         extractor.extract(Path("does_not_exist.pdf"))
 
 
-def test_pymupdf_extractor_skips_short_spans() -> None:
-    """Text blocks shorter than 3 chars should be dropped."""
+def test_pymupdf_extractor_block_level_filter() -> None:
+    """PyMuPDF joins all spans in a block into one string.
+
+    The _MIN_TEXT_LEN filter applies to the whole joined block text,
+    not individual spans. A block with spans ['Hi', 'Hello world']
+    produces element text 'Hi Hello world' (14 chars) and is kept.
+    A block whose joined text is under 3 chars is dropped entirely.
+    """
     from src.extraction.pymupdf_extractor import PyMuPDFExtractor
 
     with patch("src.extraction.pymupdf_extractor.fitz") as mock_fitz:
@@ -133,26 +139,28 @@ def test_pymupdf_extractor_skips_short_spans() -> None:
         mock_page.get_text.return_value = {
             "blocks": [
                 {
+                    # Block 1: joined text = "Hi Hello world" (kept)
                     "type": 0,
                     "bbox": [0, 0, 100, 30],
-                    "lines": [
-                        {
-                            "spans": [
-                                {"text": "Hi"},          # too short
-                                {"text": "Hello world"},
-                            ]
-                        }
-                    ],
-                }
+                    "lines": [{"spans": [{"text": "Hi"}, {"text": "Hello world"}]}],
+                },
+                {
+                    # Block 2: joined text = "x" (2 chars, dropped)
+                    "type": 0,
+                    "bbox": [0, 40, 100, 50],
+                    "lines": [{"spans": [{"text": "x"}]}],
+                },
             ]
         }
         mock_fitz.open.return_value = mock_doc
         mock_fitz.TEXT_PRESERVE_WHITESPACE = 0
 
-        # Patch exists() so the path check passes
         with patch.object(Path, "exists", return_value=True):
             extractor = PyMuPDFExtractor()
             pages = extractor.extract(Path("dummy.pdf"))
 
         texts = [el.text for p in pages for el in p.elements]
-        assert "Hello world" in texts
+        # Block 1 is kept — joined text contains both spans
+        assert any("Hello world" in t for t in texts)
+        # Block 2 is dropped — too short
+        assert not any(t.strip() == "x" for t in texts)

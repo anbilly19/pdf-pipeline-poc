@@ -28,7 +28,14 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-_OLLAMA_MODELS = ["gemma4:e2b", "llama3.2:3b", "mistral:7b", "llama3.1:8b"]
+_OLLAMA_MODELS = [
+    "qwen2.5:3b",
+    "qwen2.5:7b",
+    "gemma4:e2b",
+    "llama3.2:3b",
+    "llama3.1:8b",
+    "mistral:7b",
+]
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
 _MAX_SOURCE_PILLS = 3

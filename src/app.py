@@ -14,6 +14,8 @@ load_dotenv()
 import streamlit as st
 
 from src.agent.graph import build_agent
+from src.agent.router import route_query
+from src.agent.domain_config import load_active_config, DocTypeConfig
 from src.indexer import DocumentIndexer
 from src.retrieval.embedder import ChunkEmbedder
 from src.retrieval.retriever import BBoxRetriever
@@ -50,6 +52,8 @@ def _init_session() -> None:
         "latest_sources": [],
         "active_provider": None,
         "active_model": None,
+        "doc_config": None,       # DocTypeConfig for indexed document
+        "active_domain": None,    # name of domain used for last query
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -75,13 +79,8 @@ def _clear_index(store: FAISSStore) -> None:
     store._texts = []
 
 
-def _rebuild_agent(store: FAISSStore, embedder: ChunkEmbedder, provider: str, model: str) -> None:
-    """Rebuild the agent with the given provider/model and update session state."""
-    retriever = BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K)
-    st.session_state.agent = build_agent(retriever=retriever, provider=provider, model=model)
-    st.session_state.active_provider = provider
-    st.session_state.active_model = model
-    logger.info("Agent rebuilt: provider=%s model=%s", provider, model)
+def _get_retriever(store: FAISSStore, embedder: ChunkEmbedder) -> BBoxRetriever:
+    return BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K)
 
 
 def main() -> None:
@@ -89,6 +88,7 @@ def main() -> None:
     _init_session()
     store, embedder = _get_shared_components()
 
+    # ------------------------------------------------------------------ sidebar
     with st.sidebar:
         st.title("📄 PDF Q&A")
         st.caption("Agentic document assistant with bbox citation")
@@ -104,13 +104,14 @@ def main() -> None:
         else:
             model = st.selectbox("Model", _OLLAMA_MODELS)
 
-        # Auto-rebuild agent when model/provider changes (no re-index needed)
+        # Rebuild agent when provider/model changes (no re-index needed)
         if (
             st.session_state.indexed_doc
-            and st.session_state.agent is not None
+            and st.session_state.active_provider is not None
             and (provider != st.session_state.active_provider or model != st.session_state.active_model)
         ):
-            _rebuild_agent(store, embedder, provider, model)
+            st.session_state.active_provider = provider
+            st.session_state.active_model = model
             st.success(f"Switched to {provider}/{model}")
 
         st.divider()
@@ -121,58 +122,97 @@ def main() -> None:
             pdf_path.write_bytes(uploaded.read())
             with st.spinner("Extracting and indexing..."):
                 _clear_index(store)
-                indexer = DocumentIndexer(embedder=embedder, store=store)
+                indexer = DocumentIndexer(
+                    embedder=embedder,
+                    store=store,
+                    llm_provider=provider,
+                    llm_model=model,
+                )
                 n = indexer.index(pdf_path)
-            st.success(f"Indexed {n} chunks from {uploaded.name}")
+                doc_config: DocTypeConfig = indexer.last_doc_type or load_active_config()
+            st.success(f"Indexed {n} chunks from **{uploaded.name}**")
+            st.info(f"📂 Doc type detected: **{doc_config.display_name}**")
             st.session_state.indexed_doc = pdf_path.stem
+            st.session_state.doc_config = doc_config
+            st.session_state.active_provider = provider
+            st.session_state.active_model = model
+            st.session_state.active_domain = None
             st.session_state.messages = []
             st.session_state.overlay_source = None
             st.session_state.latest_sources = []
-            _rebuild_agent(store, embedder, provider, model)
 
+        # Active doc info
         if st.session_state.indexed_doc:
-            active_model = st.session_state.get("active_model", "?")
-            active_provider = st.session_state.get("active_provider", "?")
+            doc_config: DocTypeConfig | None = st.session_state.get("doc_config")
             st.info(f"Active doc: **{st.session_state.indexed_doc}**")
-            st.caption(f"Model: {active_provider}/{active_model}")
+            if doc_config:
+                st.caption(f"Type: {doc_config.display_name}")
+                domains = [s.display_name for s in doc_config.domains.values()]
+                st.caption(f"Domains: {', '.join(domains)}")
+            active_domain = st.session_state.get("active_domain")
+            if active_domain:
+                st.caption(f"→ Last query domain: **{active_domain}**")
+            st.caption(f"Model: {st.session_state.active_provider}/{st.session_state.active_model}")
+
         st.divider()
         if st.button("Clear conversation"):
             st.session_state.messages = []
             st.session_state.overlay_source = None
             st.session_state.latest_sources = []
+            st.session_state.active_domain = None
             st.rerun()
 
+    # ------------------------------------------------------------------ main layout
     chat_col, view_col = st.columns([3, 2])
 
     with chat_col:
         st.subheader("Chat")
-        if not st.session_state.agent:
+        if not st.session_state.indexed_doc:
             st.info("Upload and index a PDF to start.")
         else:
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
+                    if msg["role"] == "assistant" and msg.get("domain"):
+                        st.caption(f"→ domain: {msg['domain']}")
 
             if prompt := st.chat_input("Ask a question about the document..."):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.chat_message("user"):
                     st.markdown(prompt)
+
+                # Route query to best domain
+                doc_config = st.session_state.get("doc_config") or load_active_config()
+                domain_spec = route_query(prompt, config=doc_config)
+                st.session_state.active_domain = domain_spec.display_name
+
                 with st.chat_message("assistant"):
-                    with st.spinner("Thinking..."):
+                    with st.spinner(f"Thinking [{domain_spec.display_name}]..."):
                         from langchain_core.messages import HumanMessage  # noqa: PLC0415
-                        result = st.session_state.agent.invoke(
+                        retriever = _get_retriever(store, embedder)
+                        agent = build_agent(
+                            retriever=retriever,
+                            provider=st.session_state.active_provider,
+                            model=st.session_state.active_model,
+                            domain_spec=domain_spec,
+                        )
+                        result = agent.invoke(
                             {"messages": [HumanMessage(content=prompt)]},
                         )
-                        last = result["messages"][-1]
-                        answer = last.content
+                        answer = result["messages"][-1].content
                     st.markdown(answer)
+                    st.caption(f"→ domain: {domain_spec.display_name} | model: {domain_spec.model}")
+
                 sources = _extract_sources_from_messages(result["messages"])
                 st.session_state.latest_sources = sources
                 if sources:
                     st.session_state.overlay_source = sources[0]
-                st.session_state.messages.append(
-                    {"role": "assistant", "content": answer, "sources": sources}
-                )
+                st.session_state.messages.append({
+                    "role": "assistant",
+                    "content": answer,
+                    "sources": sources,
+                    "domain": domain_spec.display_name,
+                })
                 st.rerun()
 
     with view_col:

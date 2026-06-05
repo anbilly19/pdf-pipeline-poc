@@ -81,7 +81,7 @@ $pythonScript = $scriptBlock -replace "QUERIES_PLACEHOLDER", $pyList
 
 # --- Run ---
 Write-Host "`nRunning retrieval diagnostic...`n" -ForegroundColor Cyan
-$pythonScript | python -
+$pythonScript | uv run -
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`nDiagnostic failed. Make sure you have indexed a PDF first." -ForegroundColor Red

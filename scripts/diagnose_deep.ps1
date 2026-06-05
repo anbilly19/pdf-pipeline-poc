@@ -85,7 +85,7 @@ else:
 '@
 
 Write-Host "`nRunning deep diagnostic...`n" -ForegroundColor Cyan
-$python | python -
+$python | uv run -
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host "`nFailed. Make sure the PDF is indexed in Streamlit first." -ForegroundColor Red

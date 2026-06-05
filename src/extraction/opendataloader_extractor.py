@@ -3,23 +3,23 @@
 Produces Element/Page objects from ODL's nested JSON output.
 Requires: opendataloader-pdf>=1.12.0 and Java 11+.
 
-Element type mapping:
-    paragraph / heading / list  ->  type="text"
-    table                       ->  type="table"  (markdown-rendered)
+ODL JSON structure
+------------------
+Top-level `kids` contains page elements. Each element may have nested
+`kids` of its own (list items, table rows/cells). Content is stored in
+`content` for paragraphs/headings, and recursively in nested `kids` for
+list and table elements. This extractor flattens all nested content.
 
-Confidence constants:
-    heading    0.95  (high — structural signal)
-    paragraph  0.92  (standard digital-born text)
-    list       0.90  (slightly lower — list items can be noisy)
-    table      0.85  (lower — cell merging heuristics may err)
+Element type mapping:
+    paragraph / heading  ->  type="text"
+    list                 ->  type="text"  (flattened bullet text)
+    table                ->  type="table" (markdown-rendered)
 
 Page number normalisation
-------------------------
-ODL reports LOGICAL page labels from PDF metadata (e.g. a merged PDF
-whose AGB section restarts at “1” gives AGB page 9 a logical number of 9
-but it sits at physical fitz index 10). We build a label→physical-index
-map using fitz so that chunk.page_number always matches the physical page
-the renderer saved as page_NNNN.png.
+--------------------------
+ODL reports LOGICAL page labels from PDF metadata. We build a
+label→physical-index map using fitz to ensure chunk.page_number always
+matches the physical page the renderer saved as page_NNNN.png.
 """
 from __future__ import annotations
 
@@ -44,25 +44,9 @@ _MIN_TEXT_LEN = 3
 
 
 class OpenDataLoaderExtractor(BaseExtractor):
-    """Extracts text and tables with bounding boxes using OpenDataLoader PDF.
-
-    ODL writes a JSON file to disk; this extractor reads that file and
-    maps the nested structure into Element/Page model objects.
-    """
+    """Extracts text and tables with bounding boxes using OpenDataLoader PDF."""
 
     def extract(self, pdf_path: Path) -> list[Page]:
-        """Extract pages from a PDF using OpenDataLoader.
-
-        Args:
-            pdf_path: Absolute path to the PDF file.
-
-        Returns:
-            List of Page objects with physical 1-based page_number.
-
-        Raises:
-            ExtractionError: If ODL is not installed, Java is missing,
-                             or the PDF cannot be parsed.
-        """
         if not pdf_path.exists():
             raise ExtractionError(f"PDF not found: {pdf_path}")
 
@@ -70,77 +54,49 @@ class OpenDataLoaderExtractor(BaseExtractor):
             from opendataloader_pdf import convert  # noqa: PLC0415
         except ImportError as exc:
             raise ExtractionError(
-                "opendataloader-pdf is not installed. "
-                "Run: pip install opendataloader-pdf"
+                "opendataloader-pdf is not installed. Run: pip install opendataloader-pdf"
             ) from exc
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             json_out = tmp_path / (pdf_path.stem + ".json")
-
             try:
                 convert(str(pdf_path.resolve()), str(tmp_path))
             except Exception as exc:
-                raise ExtractionError(
-                    f"OpenDataLoader failed on {pdf_path}: {exc}"
-                ) from exc
+                raise ExtractionError(f"OpenDataLoader failed on {pdf_path}: {exc}") from exc
 
             if not json_out.exists():
-                fallback = pdf_path.with_suffix(".json")
-                if fallback.exists():
-                    json_out = fallback
-                else:
-                    raise ExtractionError(
-                        f"ODL produced no JSON output for {pdf_path}"
-                    )
+                raise ExtractionError(f"ODL produced no JSON output for {pdf_path}")
 
             try:
                 raw = json.loads(json_out.read_text(encoding="utf-8"))
             except Exception as exc:
-                raise ExtractionError(
-                    f"Failed to read ODL JSON output: {exc}"
-                ) from exc
+                raise ExtractionError(f"Failed to read ODL JSON: {exc}") from exc
 
         label_to_physical = _build_label_to_physical_map(pdf_path)
         return self._parse(raw, label_to_physical)
 
     def _parse(self, raw: dict, label_to_physical: dict[int, int]) -> list[Page]:
-        """Convert ODL JSON dict into a list of Page objects.
-
-        Remaps ODL logical page numbers to physical 1-based indices so
-        they match the filenames written by PageRenderer (page_NNNN.png).
-
-        Args:
-            raw: Parsed ODL JSON output dict with 'kids' list.
-            label_to_physical: Mapping from ODL logical page label to
-                               physical 1-based page index.
-
-        Returns:
-            List of Page objects ordered by physical page number.
-        """
         kids: list[dict] = raw.get("kids", [])
-
         pages_map: dict[int, list[Element]] = {}
+
         for kid in kids:
-            element = self._map_element(kid)
-            if element is None:
-                continue
             odl_page: int = kid.get("page number", 1)
-            # Remap logical → physical; fall back to logical if not in map
             physical_page = label_to_physical.get(odl_page, odl_page)
-            pages_map.setdefault(physical_page, []).append(element)
+
+            elements = self._map_element(kid)
+            for element in elements:
+                pages_map.setdefault(physical_page, []).append(element)
 
         pages: list[Page] = []
         for page_num in sorted(pages_map):
             elements = pages_map[page_num]
-            pages.append(
-                Page(
-                    page_number=page_num,
-                    image_path="",
-                    elements=elements,
-                )
-            )
-            logger.debug("ODL page %d (physical): %d elements", page_num, len(elements))
+            pages.append(Page(
+                page_number=page_num,
+                image_path="",
+                elements=elements,
+            ))
+            logger.debug("ODL page %d: %d elements", page_num, len(elements))
 
         logger.info(
             "ODL extracted %d pages, %d elements total",
@@ -149,96 +105,106 @@ class OpenDataLoaderExtractor(BaseExtractor):
         )
         return pages
 
-    def _map_element(self, kid: dict) -> Element | None:
-        """Map a single ODL 'kid' dict to an Element."""
+    def _map_element(self, kid: dict) -> list[Element]:
+        """Map a single ODL element to one or more Element objects.
+
+        Recursively extracts nested list items and table content.
+        Returns a list (usually one item, but lists expand to multiple).
+        """
         odl_type: str = kid.get("type", "paragraph").lower()
         bbox: list[float] = kid.get("bounding box", [])
         confidence: float = _CONFIDENCE.get(odl_type, _CONFIDENCE_DEFAULT)
 
         if len(bbox) != 4:
-            logger.debug("Skipping element with invalid bbox: %s", kid.get("id"))
-            return None
+            logger.debug("Skipping element with invalid bbox: type=%s", odl_type)
+            return []
 
         if odl_type == "table":
             text = _render_table_markdown(kid)
-            if len(text.strip()) < _MIN_TEXT_LEN:
-                return None
-            return Element(type="table", text=text, bbox=bbox, confidence=confidence)
+            if len(text.strip()) >= _MIN_TEXT_LEN:
+                return [Element(type="table", text=text, bbox=bbox, confidence=confidence)]
+            return []
 
+        if odl_type == "list":
+            # Flatten nested list kids into a single text block
+            text = _flatten_list(kid)
+            if len(text.strip()) >= _MIN_TEXT_LEN:
+                return [Element(type="text", text=text, bbox=bbox, confidence=confidence)]
+            return []
+
+        # paragraph / heading / unknown
         text: str = kid.get("content", "").strip()
         if len(text) < _MIN_TEXT_LEN:
-            return None
+            return []
+        return [Element(type="text", text=text, bbox=bbox, confidence=confidence)]
 
-        return Element(type="text", text=text, bbox=bbox, confidence=confidence)
 
+# ---------------------------------------------------------------------------
+# List flattening
+# ---------------------------------------------------------------------------
 
-def _build_label_to_physical_map(pdf_path: Path) -> dict[int, int]:
-    """Build a mapping from PDF logical page labels to physical 1-based indices.
+def _flatten_list(node: dict, depth: int = 0) -> str:
+    """Recursively extract text from a list element and its nested kids.
 
-    Uses fitz to read the PDF page labels. For PDFs without explicit labels,
-    the mapping is identity (1→1, 2→2, …). For merged PDFs where sections
-    restart numbering, duplicate labels are disambiguated by physical order.
-
-    Args:
-        pdf_path: Path to the PDF.
-
-    Returns:
-        Dict mapping logical label (int) -> physical index (1-based int).
-        Falls back to empty dict (caller uses identity) if fitz fails.
+    ODL list structure:
+        {type: list, kids: [
+            {type: list-item, content: "text", kids: [...]},
+            ...
+        ]}
     """
-    try:
-        import fitz  # noqa: PLC0415
-        doc = fitz.open(str(pdf_path))
-        mapping: dict[int, int] = {}
-        seen_labels: set[int] = set()
-        for physical_idx in range(len(doc)):
-            label_str = doc[physical_idx].get_label()  # e.g. "1", "2", "A-1"
-            physical = physical_idx + 1  # 1-based
-            try:
-                label_int = int(label_str)
-            except (ValueError, TypeError):
-                # Non-numeric label (e.g. "A-1") — use physical index directly
-                mapping[physical] = physical
-                continue
-            if label_int not in seen_labels:
-                mapping[label_int] = physical
-                seen_labels.add(label_int)
-            else:
-                # Duplicate label (restart): map to physical index
-                # ODL will report this as label_int again — we can't distinguish,
-                # so log a warning and prefer the first occurrence.
-                logger.warning(
-                    "Duplicate page label %d at physical page %d — "
-                    "ODL page numbers may be ambiguous for this PDF.",
-                    label_int,
-                    physical,
-                )
-        doc.close()
-        logger.info("Page label map: %s", mapping)
-        return mapping
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Could not build page label map: %s — using identity", exc)
-        return {}
+    lines: list[str] = []
+
+    # Direct content on this node
+    content = node.get("content", "").strip()
+    if content:
+        lines.append(content)
+
+    # Recurse into kids
+    for child in node.get("kids", []):
+        child_type = child.get("type", "").lower()
+        child_content = child.get("content", "").strip()
+
+        if child_content:
+            lines.append(child_content)
+
+        # Recurse further if the child has its own kids
+        if child.get("kids"):
+            nested = _flatten_list(child, depth + 1)
+            if nested:
+                lines.append(nested)
+
+    return "\n".join(line for line in lines if line.strip())
 
 
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Table rendering
-# ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 
 def _render_table_markdown(table: dict) -> str:
-    """Render an ODL table element as a pipe-delimited markdown table."""
-    rows: list[dict] = table.get("rows", [])
+    """Render an ODL table element as a pipe-delimited markdown table.
+
+    Handles both flat rows list and nested kids structure.
+    """
+    rows: list[dict] = table.get("rows", []) or [
+        k for k in table.get("kids", []) if k.get("type", "").lower() == "row"
+    ]
     if not rows:
-        return ""
+        # Try flattening as list as last resort
+        text = _flatten_list(table)
+        return text if len(text.strip()) >= _MIN_TEXT_LEN else ""
 
     lines: list[str] = []
     for row_idx, row in enumerate(rows):
-        cells: list[dict] = row.get("cells", [])
+        cells: list[dict] = row.get("cells", []) or [
+            k for k in row.get("kids", []) if k.get("type", "").lower() in ("cell", "table-cell")
+        ]
         cells_sorted = sorted(cells, key=lambda c: c.get("column number", 0))
         cell_texts = [
             _cell_text(c).replace("|", "\\|").replace("\n", " ")
             for c in cells_sorted
         ]
+        if not cell_texts:
+            continue
         lines.append("| " + " | ".join(cell_texts) + " |")
         if row_idx == 0:
             lines.append("| " + " | ".join("---" for _ in cell_texts) + " |")
@@ -247,6 +213,40 @@ def _render_table_markdown(table: dict) -> str:
 
 
 def _cell_text(cell: dict) -> str:
-    """Extract plain text from a table cell dict."""
     text = cell.get("content", cell.get("text", "")).strip()
+    if not text and cell.get("kids"):
+        text = _flatten_list(cell)
     return text if text else " "
+
+
+# ---------------------------------------------------------------------------
+# Page label map
+# ---------------------------------------------------------------------------
+
+def _build_label_to_physical_map(pdf_path: Path) -> dict[int, int]:
+    """Map PDF logical page labels to physical 1-based indices via fitz."""
+    try:
+        import fitz  # noqa: PLC0415
+        doc = fitz.open(str(pdf_path))
+        mapping: dict[int, int] = {}
+        seen: set[int] = set()
+        for idx in range(len(doc)):
+            physical = idx + 1
+            try:
+                label_int = int(doc[idx].get_label())
+            except (ValueError, TypeError):
+                mapping[physical] = physical
+                continue
+            if label_int not in seen:
+                mapping[label_int] = physical
+                seen.add(label_int)
+            else:
+                logger.warning(
+                    "Duplicate page label %d at physical page %d", label_int, physical
+                )
+        doc.close()
+        logger.info("Page label map: %s", mapping)
+        return mapping
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not build page label map: %s — using identity", exc)
+        return {}

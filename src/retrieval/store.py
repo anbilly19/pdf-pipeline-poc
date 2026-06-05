@@ -57,6 +57,7 @@ class FAISSStore:
     def _save(self) -> None:
         """Persist index and metadata to disk."""
         import faiss  # noqa: PLC0415
+        self._persist_dir.mkdir(parents=True, exist_ok=True)  # guard: recreate if deleted
         faiss.write_index(self._index, str(self._index_path))  # type: ignore[arg-type]
         self._meta_path.write_text(
             json.dumps({"metadata": self._metadata, "texts": self._texts}, ensure_ascii=False),

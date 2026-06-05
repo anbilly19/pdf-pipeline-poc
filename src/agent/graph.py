@@ -18,26 +18,30 @@ logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = """Du bist ein Dokumentenassistent f\u00fcr deutsche Vertr\u00e4ge.
 
-REGELN (alle zwingend):
+REGELN:
 
-1. Rufe IMMER zuerst search_term mit deutschen Schl\u00fcsselw\u00f6rtern auf, bevor du antwortest.
-   - Suche nach dem genauen Begriff aus der Frage (z.B. "Verz\u00f6gerung", "K\u00fcndigung", "Laufzeit").
-   - Falls die erste Suche keine passenden Ergebnisse liefert, suche nochmal mit anderen Begriffen.
+1. Rufe IMMER zuerst search_term auf mit top_k=10 und deutschen Schl\u00fcsselw\u00f6rtern.
+   Beispiele: "Verz\u00f6gerung Frist", "K\u00fcndigung Laufzeit", "Vertragsstrafe".
 
-2. Beantworte die Frage NUR mit dem Text aus den Tool-Ergebnissen.
-   - Zitiere Abschnitte w\u00f6rtlich oder fasse sie zusammen.
-   - Erw\u00e4hne KEINE Gesetze (BGB, HGB etc.), die nicht im gefundenen Text stehen.
-   - Verwende KEINE Paragraphennummern, die nicht im gefundenen Text stehen.
-   - Erfinde NICHTS.
+2. Lies ALLE zur\u00fcckgegebenen Textabschnitte vollst\u00e4ndig durch.
+   Der relevante Abschnitt kann weiter unten in der Liste stehen.
+   Zitiere ihn w\u00f6rtlich in deiner Antwort.
 
-3. Wenn der gefundene Text die Frage nicht beantwortet, antworte NUR:
+3. Wenn ein Abschnitt die Frage teilweise beantwortet, rufe search_term
+   ein zweites Mal mit anderen Schl\u00fcsselw\u00f6rtern auf.
+
+4. Antworte NUR mit Inhalten aus den Tool-Ergebnissen.
+   Erw\u00e4hne KEINE Gesetze oder Paragraphen, die nicht im gefundenen Text stehen.
+   Erfinde NICHTS.
+
+5. Wenn kein Abschnitt die Frage beantwortet:
    "Dazu enth\u00e4lt der Vertrag keine explizite Regelung."
 
-4. Beende jede Antwort mit Quellenangaben aus den Tool-Ergebnissen:
+6. Beende jede Antwort mit:
    [Quelle: Seite <N>, Bboxes: <bboxes>]
    Kopiere Seitenzahl und Bboxes exakt aus den Tool-Ergebnissen.
 
-5. Antworte in der Sprache der Frage.
+7. Antworte in der Sprache der Frage.
 """
 
 _SYSTEM_MESSAGE = SystemMessage(content=_SYSTEM_PROMPT)
@@ -48,7 +52,6 @@ class AgentState(TypedDict):
 
 
 def _current_turn_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
-    """Extract only the current turn's messages (last HumanMessage onward)."""
     for i in range(len(messages) - 1, -1, -1):
         if isinstance(messages[i], HumanMessage):
             return messages[i:]
@@ -58,11 +61,7 @@ def _current_turn_messages(messages: list[BaseMessage]) -> list[BaseMessage]:
 def _build_llm(provider: str, model: str, temperature: float) -> object:
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # noqa: PLC0415
-        return ChatOpenAI(
-            model=model,
-            temperature=temperature,
-            api_key=os.environ["OPENAI_API_KEY"],
-        )
+        return ChatOpenAI(model=model, temperature=temperature, api_key=os.environ["OPENAI_API_KEY"])
     elif provider == "ollama":
         from langchain_ollama import ChatOllama  # noqa: PLC0415
         return ChatOllama(model=model, temperature=temperature)

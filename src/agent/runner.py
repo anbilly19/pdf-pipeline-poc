@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-import uuid
 import warnings
 
 warnings.filterwarnings("ignore", message="Accessing `__path__`", module="transformers")
@@ -34,8 +33,6 @@ def run_cli(provider: str = "ollama", model: str = "gemma4:e2b") -> None:
     retriever = BBoxRetriever(store=store, embedder=embedder, top_k=5)
     agent = build_agent(retriever=retriever, provider=provider, model=model)
 
-    thread_id = str(uuid.uuid4())
-    config = {"configurable": {"thread_id": thread_id}}
     tracing = os.getenv("LANGCHAIN_TRACING_V2", "false")
     print(f"\nPDF Agent ready (provider={provider}, model={model}, tracing={tracing})")
     print("Type 'exit' to quit.\n")
@@ -53,7 +50,6 @@ def run_cli(provider: str = "ollama", model: str = "gemma4:e2b") -> None:
             continue
         result = agent.invoke(
             {"messages": [HumanMessage(content=user_input)]},
-            config=config,
         )
         print(f"\nAssistant: {result['messages'][-1].content}\n")
 

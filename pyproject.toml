@@ -57,3 +57,7 @@ strict = true
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+filterwarnings = [
+    "ignore::DeprecationWarning:langgraph",
+    "ignore:AgentStatePydantic has been moved:langchain",
+]

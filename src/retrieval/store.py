@@ -20,16 +20,21 @@ logger = logging.getLogger(__name__)
 _INDEX_FILE = "index.faiss"
 _META_FILE = "metadata.json"
 
+# Repo root = two levels up from this file (src/retrieval/store.py)
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+_DEFAULT_PERSIST_DIR = _REPO_ROOT / "outputs" / "faiss_index"
+
 
 class FAISSStore:
     """Persisted FAISS vector store for PDF chunks.
 
     Args:
         persist_dir: Directory where index and metadata are saved.
+                     Defaults to <repo_root>/outputs/faiss_index (absolute).
     """
 
-    def __init__(self, persist_dir: Path = Path("outputs/faiss_index")) -> None:
-        self._persist_dir = persist_dir
+    def __init__(self, persist_dir: Path = _DEFAULT_PERSIST_DIR) -> None:
+        self._persist_dir = persist_dir.resolve()
         self._persist_dir.mkdir(parents=True, exist_ok=True)
         self._index_path = self._persist_dir / _INDEX_FILE
         self._meta_path = self._persist_dir / _META_FILE
@@ -50,9 +55,10 @@ class FAISSStore:
             data = json.loads(self._meta_path.read_text(encoding="utf-8"))
             self._metadata = data["metadata"]
             self._texts = data["texts"]
-            logger.info("Loaded FAISS index with %d vectors", len(self._metadata))
+            logger.info("Loaded FAISS index with %d vectors from %s", len(self._metadata), self._persist_dir)
         else:
             self._index = None
+            logger.info("No existing FAISS index at %s — will create on first add", self._persist_dir)
 
     def _save(self) -> None:
         """Persist index and metadata to disk."""
@@ -183,14 +189,13 @@ class FAISSStore:
         return len(self._metadata)
 
     def _rebuild_embeddings(self, metadata: list[dict[str, object]]) -> list[list[float]]:
-        """Placeholder — kept entries don't need re-embedding; return empty list.
+        """Reload kept vectors from the existing on-disk index.
 
         In practice we store all vectors in the FAISS index and keep/drop
         by rebuilding the full index on each add_chunks call. For the PoC
         scale this is fine.
         """
-        # For simplicity in PoC: if there are kept entries, reload from saved index
-        if not metadata or self._index_path.exists() is False:
+        if not metadata or not self._index_path.exists():
             return []
         import faiss  # noqa: PLC0415
         old_index = faiss.read_index(str(self._index_path))
@@ -198,5 +203,4 @@ class FAISSStore:
         if n_kept == 0:
             return []
         vecs = old_index.reconstruct_n(0, old_index.ntotal)  # type: ignore[union-attr]
-        # only keep first n_kept rows (those not removed)
         return vecs[:n_kept].tolist()

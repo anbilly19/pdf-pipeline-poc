@@ -65,10 +65,11 @@ def test_max_chars_split() -> None:
 
 
 def test_heading_starts_new_chunk() -> None:
+    """A numbered section heading element must flush the current buffer and start a new chunk."""
     chunker = LayoutChunker(config=_CFG)
     elems = [
         _text("Einleitung text hier."),
-        _text("NEUE SEKTION"),  # all-caps heading heuristic
+        _text("15 Laufzeit und Kuendigung"),  # numbered heading matched by _HEADING_RE
         _text("Inhalt der neuen Sektion."),
     ]
     page = _make_page(elems)

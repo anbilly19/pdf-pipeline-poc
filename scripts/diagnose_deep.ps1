@@ -12,7 +12,6 @@ sys.path.insert(0, str(Path(".").resolve()))
 
 import numpy as np
 
-# suppress noise
 warnings.filterwarnings("ignore", message=r"Accessing `__path__`")
 import logging
 logging.getLogger("transformers").setLevel(logging.ERROR)
@@ -51,19 +50,25 @@ except Exception as e:
 if ollama_ok:
     try:
         import requests
-        payload = {"model": "nomic-embed-text", "input": ["test"]}
+        payload = {"model": "nomic-embed-text", "input": ["Kundigung", "Vertragsstrafe", "Haftung"]}
         r = requests.post("http://localhost:11434/api/embed", json=payload, timeout=10)
-        data_r = r.json()
-        emb = data_r.get("embeddings", [[]])[0]
-        norm = float(np.linalg.norm(emb)) if emb else 0
-        print(f"nomic-embed-text test: dim={len(emb)}, norm={norm:.4f}")
-        if norm < 1e-6:
-            print("WARN: nomic-embed-text returning zero vector! Model may not be pulled.")
-            print("Fix: ollama pull nomic-embed-text")
+        embs = r.json().get("embeddings", [])
+        if embs and len(embs) >= 2:
+            v0 = np.array(embs[0])
+            v1 = np.array(embs[1])
+            n0, n1 = np.linalg.norm(v0), np.linalg.norm(v1)
+            sim = float(np.dot(v0/n0, v1/n1)) if n0 > 1e-6 and n1 > 1e-6 else 1.0
+            print(f"nomic-embed-text: dim={len(embs[0])}, norm0={n0:.4f}")
+            print(f"  cos_sim('Kundigung','Vertragsstrafe') = {sim:.4f}")
+            if sim > 0.999:
+                print("  WARN: Ollama still returning identical vectors for different inputs.")
+                print("  Try: ollama pull nomic-embed-text")
+            else:
+                print("  Ollama embeddings look healthy.")
     except Exception as e:
         print(f"nomic-embed-text call failed: {e}")
 
-# -- 3. Force sentence-transformers directly (bypass Ollama) ---------------
+# -- 3. sentence-transformers direct test ----------------------------------
 print("\n" + "="*60)
 print("SENTENCE-TRANSFORMERS DIRECT TEST")
 print("="*60)
@@ -74,21 +79,42 @@ try:
     model = SentenceTransformer("paraphrase-multilingual-mpnet-base-v2")
     test_queries = ["Kundigung", "Vertragsstrafe", "Haftung", "Insolvenz", "Geheimhaltung"]
     vecs = model.encode(test_queries, normalize_embeddings=True, show_progress_bar=False)
-    print(f"Model loaded. dim={vecs.shape[1]}")
     sim = vecs @ vecs.T
     max_off = float(np.max(sim - np.eye(len(test_queries))))
-    print(f"Max off-diagonal cosine similarity: {max_off:.4f}")
-    for q, v in zip(test_queries, vecs):
-        print(f"  '{q}': first3={[round(x,4) for x in v[:3].tolist()]}")
+    print(f"dim={vecs.shape[1]}, max off-diag sim={max_off:.4f}")
     if max_off < 0.98:
-        print("\nsentence-transformers OK — fallback will work correctly.")
-        print("ACTION: Re-index the PDF in Streamlit to rebuild embeddings with ST.")
+        print("sentence-transformers OK")
     else:
-        print("\nERROR: sentence-transformers also returning constant vectors.")
+        print("ERROR: ST also returning constant vectors")
 except Exception as e:
     print(f"sentence-transformers failed: {e}")
-    print("Fix: pip install sentence-transformers")
+    print("Fix: uv add sentence-transformers")
+
+# -- 4. Live pipeline dry-run (no Streamlit) -------------------------------
+print("\n" + "="*60)
+print("PIPELINE DRY-RUN (first PDF in data/)")
+print("="*60)
+pdfs = list(Path("data").glob("*.pdf"))
+if not pdfs:
+    print("No PDFs in data/ — skip")
+else:
+    pdf = pdfs[0]
+    print(f"Testing: {pdf.name}")
+    import os
+    os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+    from src.pipeline import PDFPipeline
+    pipeline = PDFPipeline()
+    chunks = pipeline.run(pdf)
+    print(f"Chunks produced: {len(chunks)}")
+    sec15 = [c for c in chunks if "k\u00fcndigung" in c.text.lower() or "laufzeit" in c.text.lower()]
+    print(f"Chunks containing 'Laufzeit'/'K\u00fcndigung': {len(sec15)}")
+    for c in sec15:
+        print(f"  Page {c.page_number}: {c.text[:150].replace(chr(10), ' ')}")
 '@
 
-Write-Host "`nRunning deep diagnostic...`n" -ForegroundColor Cyan
-$python | python -
+Write-Host "`nRunning deep diagnostic (uv)...`n" -ForegroundColor Cyan
+$python | uv run python -
+
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "`nFailed. Make sure the PDF is in data/ and dependencies are installed." -ForegroundColor Red
+}

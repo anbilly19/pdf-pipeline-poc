@@ -12,20 +12,24 @@ sentence-transformers fallback for that batch/query.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+import warnings
 
 import numpy as np
 
 from src.models import Chunk
 
-if TYPE_CHECKING:
-    pass
-
 logger = logging.getLogger(__name__)
 
 _DEFAULT_OLLAMA_MODEL = "nomic-embed-text"
 _FALLBACK_ST_MODEL = "paraphrase-multilingual-mpnet-base-v2"
-_ZERO_THRESHOLD = 1e-6  # vectors with norm below this are considered broken
+_ZERO_THRESHOLD = 1e-6
+
+# Suppress noisy transformers __path__ alias warnings emitted during
+# sentence-transformers / transformers import (harmless, fixed upstream).
+warnings.filterwarnings("ignore", message=r"Accessing `__path__`", module="transformers")
+warnings.filterwarnings("ignore", message=r"Accessing `__path__`")
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
 
 class ChunkEmbedder:
@@ -49,8 +53,8 @@ class ChunkEmbedder:
         self._model = model
         self._base_url = base_url
         self._fallback_model = fallback_model
-        self._use_fallback = False  # latched to True once Ollama is detected broken
-        self._st_model = None  # lazy-loaded
+        self._use_fallback = False
+        self._st_model = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -71,15 +75,13 @@ class ChunkEmbedder:
 
     def embed_query(self, query: str) -> list[float]:
         """Embed a single query string."""
-        vectors = self._embed_texts([query])
-        return vectors[0]
+        return self._embed_texts([query])[0]
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
 
     def _embed_texts(self, texts: list[str]) -> list[list[float]]:
-        """Embed texts, falling back to sentence-transformers on Ollama failure."""
         if not self._use_fallback:
             try:
                 vectors = self._ollama_embed(texts)
@@ -98,7 +100,6 @@ class ChunkEmbedder:
                     exc,
                 )
                 self._use_fallback = True
-
         return self._st_embed(texts)
 
     def _ollama_embed(self, texts: list[str]) -> list[list[float]]:
@@ -110,7 +111,11 @@ class ChunkEmbedder:
         """Embed using sentence-transformers (offline, multilingual)."""
         if self._st_model is None:
             try:
-                from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+                # Import inside suppressed warning context
+                with warnings.catch_warnings():
+                    warnings.filterwarnings("ignore", message=r"Accessing `__path__`")
+                    warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+                    from sentence_transformers import SentenceTransformer  # noqa: PLC0415
             except ImportError as exc:
                 raise RuntimeError(
                     "sentence-transformers is not installed. "
@@ -118,24 +123,22 @@ class ChunkEmbedder:
                     "Also ensure Ollama is running: ollama serve"
                 ) from exc
             logger.info("Loading sentence-transformers model: %s", self._fallback_model)
-            self._st_model = SentenceTransformer(self._fallback_model)
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", message=r"Accessing `__path__`")
+                warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+                self._st_model = SentenceTransformer(self._fallback_model)
             logger.info("sentence-transformers model loaded.")
         vecs = self._st_model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
         return vecs.tolist()
 
     @staticmethod
     def _is_broken(vectors: list[list[float]]) -> bool:
-        """Return True if vectors are zero or all identical (Ollama silent failure)."""
         if not vectors:
             return True
         arr = np.array(vectors, dtype=np.float32)
-        # Check for zero vectors
         norms = np.linalg.norm(arr, axis=1)
         if np.all(norms < _ZERO_THRESHOLD):
             return True
-        # Check if all vectors are identical (constant output)
-        if len(arr) > 1:
-            diffs = np.max(np.abs(arr - arr[0]))
-            if diffs < _ZERO_THRESHOLD:
-                return True
+        if len(arr) > 1 and np.max(np.abs(arr - arr[0])) < _ZERO_THRESHOLD:
+            return True
         return False

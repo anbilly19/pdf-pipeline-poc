@@ -1,40 +1,11 @@
 """Streamlit frontend for the PDF Q&A pipeline."""
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# Noise suppression — must happen before ANY other import that touches
-# transformers/sentence-transformers, because those libraries register their
-# loggers and emit __path__ warnings at import time.
-# ---------------------------------------------------------------------------
+# Must be first import — silences transformers __path__ spam before any model loads
+import src.silence  # noqa: F401
+
 import logging
 import os
-import warnings
-
-# 1. Suppress Python warnings
-warnings.filterwarnings("ignore", message=r"Accessing `__path__`")
-warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
-
-# 2. Tell transformers to stay quiet before it initialises its own logger
-os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-
-# 3. Set levels on known noisy loggers early
-for _noisy in ("transformers", "sentence_transformers", "huggingface_hub"):
-    logging.getLogger(_noisy).setLevel(logging.ERROR)
-
-
-class _TransformersPathFilter(logging.Filter):
-    """Drop the hundreds of '[transformers] Accessing `__path__`' lines."""
-    def filter(self, record: logging.LogRecord) -> bool:
-        return "Accessing `__path__`" not in record.getMessage()
-
-
-# Attach filter to root logger so it catches every handler
-logging.getLogger().addFilter(_TransformersPathFilter())
-
-# ---------------------------------------------------------------------------
-# Normal imports
-# ---------------------------------------------------------------------------
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -50,11 +21,6 @@ from src.retrieval.store import FAISSStore
 from src.ui.overlay import render_page_with_bboxes
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-# Re-apply after basicConfig (it may add a new handler)
-logging.getLogger().addFilter(_TransformersPathFilter())
-for _noisy in ("transformers", "sentence_transformers", "huggingface_hub"):
-    logging.getLogger(_noisy).setLevel(logging.ERROR)
-
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path("outputs")

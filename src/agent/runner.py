@@ -1,13 +1,12 @@
 """CLI runner — smoke-test before the UI."""
 from __future__ import annotations
 
+# Must be first import — silences transformers __path__ spam before any model loads
+import src.silence  # noqa: F401
+
 import argparse
 import logging
 import os
-import warnings
-
-warnings.filterwarnings("ignore", message="Accessing `__path__`", module="transformers")
-logging.getLogger("transformers").setLevel(logging.ERROR)
 
 from dotenv import load_dotenv
 load_dotenv()

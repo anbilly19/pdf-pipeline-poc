@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Directly tests ODL list extraction bypassing the pipeline.
+    Dumps all keys/values of ODL list elements on page 12.
 #>
 
 $python = @'
@@ -22,26 +22,19 @@ with tempfile.TemporaryDirectory() as tmp:
 kids = raw.get("kids", [])
 page12 = [k for k in kids if k.get("page number") == 12]
 
-print(f"Page 12 elements from raw ODL JSON: {len(page12)}")
-for e in page12:
-    print(f"  type={e.get('type')} content={repr(e.get('content','')[:60])} kids={len(e.get('kids',[]))}")
-    for child in e.get("kids", [])[:3]:
-        print(f"    child type={child.get('type')} content={repr(child.get('content','')[:80])}")
-
-print()
-print("--- Now test _flatten_list directly ---")
-import importlib, importlib.util
-spec = importlib.util.spec_from_file_location(
-    "odl_ext", Path("src/extraction/opendataloader_extractor.py")
-)
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
+print("=== ALL KEYS on page 12 list elements ===")
 for e in page12:
     if e.get("type", "").lower() == "list":
-        text = mod._flatten_list(e)
-        print(f"  _flatten_list result ({len(text)} chars): {repr(text[:200])}")
+        print(f"\nList element keys: {list(e.keys())}")
+        print(json.dumps(e, ensure_ascii=False, indent=2)[:2000])
+        break  # just first list is enough
+
+print("\n=== Top-level JSON keys ===")
+print(list(raw.keys()))
+print("\n=== First top-level kid full dump ===")
+if kids:
+    print(json.dumps(kids[0], ensure_ascii=False, indent=2)[:1000])
 '@
 
-Write-Host "`nTesting ODL list extraction directly...`n" -ForegroundColor Cyan
+Write-Host "`nDumping ODL list element structure...`n" -ForegroundColor Cyan
 $python | uv run python -

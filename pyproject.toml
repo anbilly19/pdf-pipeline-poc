@@ -58,6 +58,5 @@ strict = true
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = [
-    "ignore::DeprecationWarning:langgraph",
-    "ignore:AgentStatePydantic has been moved:langchain",
+    "ignore::DeprecationWarning",
 ]

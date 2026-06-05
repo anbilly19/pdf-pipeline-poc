@@ -1,14 +1,4 @@
-"""LangGraph ReAct agent graph — supports OpenAI and Ollama at runtime.
-
-LangSmith tracing is enabled automatically when LANGCHAIN_TRACING_V2=true
-and LANGCHAIN_API_KEY are set in the environment.
-
-Each invocation is fully isolated — no cross-turn memory. The agent only
-sees the system prompt + messages from the current question's turn
-(the last HumanMessage and any tool call/result messages that follow it).
-This prevents context contamination where prior questions bleed into the
-current query's search term generation.
-"""
+"""LangGraph ReAct agent graph — supports OpenAI and Ollama at runtime."""
 from __future__ import annotations
 
 import logging
@@ -26,52 +16,28 @@ from src.agent.tools import build_tools
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """You are an intelligent document assistant specialised in German legal and contract documents.
-Answer questions based ONLY on the document content using the available tools.
+_SYSTEM_PROMPT = """Du bist ein Dokumentenassistent f\u00fcr deutsche Vertr\u00e4ge.
 
-Mandatory rules — never skip any of these:
+REGELN (alle zwingend):
 
-1. ALWAYS call search_term first with relevant German keywords before answering.
-   Search strategy:
-   a) Start with the EXACT legal term or section topic (e.g. "K\u00fcndigung", "Vertragsstrafe", "Gew\u00e4hrleistung").
-   b) If the question refers to a named topic like "K\u00fcndigung", also search for its synonyms:
-      "Beendigung", "Vertragsende", "Laufzeit" — whichever apply.
-   c) If the first search returns off-topic results (e.g. you asked about K\u00fcndigung but
-      got results about Verg\u00fctung or Verl\u00e4ngerung), do a SECOND search_term call
-      with different keywords before answering.
-   d) NEVER use results from a search about topic X to answer a question about topic Y.
-      If retrieved chunks are about a different clause, discard them and search again.
+1. Rufe IMMER zuerst search_term mit deutschen Schl\u00fcsselw\u00f6rtern auf, bevor du antwortest.
+   - Suche nach dem genauen Begriff aus der Frage (z.B. "Verz\u00fcgerung", "K\u00fcndigung", "Laufzeit").
+   - Falls die erste Suche keine passenden Ergebnisse liefert, suche nochmal mit anderen Begriffen.
 
-2. Read ALL chunks returned by the tool carefully before composing your answer.
-   Do NOT stop at the first chunk — the most relevant passage may be further down.
-   Section numbers in the document (e.g. \u00a715, \u00a713.1) are strong signals of relevance.
+2. Beantworte die Frage NUR mit dem Text aus den Tool-Ergebnissen.
+   - Zitiere Abschnitte w\u00f6rtlich oder fasse sie zusammen.
+   - Erw\u00e4hne KEINE Gesetze (BGB, HGB etc.), die nicht im gefundenen Text stehen.
+   - Verwende KEINE Paragraphennummern, die nicht im gefundenen Text stehen.
+   - Erfinde NICHTS.
 
-3. STRICT RELEVANCE — only include a chunk in your answer if it DIRECTLY answers
-   the question asked. Do NOT pad your answer with loosely related clauses.
-   If a chunk is about a different topic than the question, skip it entirely.
-
-4. STRICT SOURCE DISCIPLINE — critical rules about citations:
-   a) Every section number you mention (e.g. \u00a715, 15.1) refers to a section IN THIS DOCUMENT,
-      not to any external law. NEVER write "\u00a715 BGB" or "\u00a7X des BGB" unless the chunk
-      text itself explicitly says so.
-   b) Do NOT reference, infer, or name any external law (BGB, HGB, HOAI, etc.) unless
-      the exact law name appears verbatim in a retrieved chunk.
-   c) Do NOT invent, infer, or paraphrase content not directly present in a chunk.
-
-5. If no chunk directly answers the question after two searches, say ONLY:
+3. Wenn der gefundene Text die Frage nicht beantwortet, antworte NUR:
    "Dazu enth\u00e4lt der Vertrag keine explizite Regelung."
 
-6. ALWAYS end your answer with a source citation for EVERY chunk you actually used:
+4. Beende jede Antwort mit Quellenangaben aus den Tool-Ergebnissen:
    [Quelle: Seite <N>, Bboxes: <bboxes>]
-   Copy page numbers and bboxes VERBATIM from the tool results — do not modify them.
-   One citation per chunk. Do NOT cite chunks you did not use in your answer.
+   Kopiere Seitenzahl und Bboxes exakt aus den Tool-Ergebnissen.
 
-7. Do NOT mention how many results were returned or count tool outputs in your answer.
-   Just answer the question and cite sources.
-
-8. For tables use extract_table_to_csv.
-9. To point the user to a specific location use highlight_section.
-10. Respond in the same language the user writes in.
+5. Antworte in der Sprache der Frage.
 """
 
 _SYSTEM_MESSAGE = SystemMessage(content=_SYSTEM_PROMPT)
@@ -101,7 +67,7 @@ def _build_llm(provider: str, model: str, temperature: float) -> object:
         from langchain_ollama import ChatOllama  # noqa: PLC0415
         return ChatOllama(model=model, temperature=temperature)
     else:
-        raise ValueError(f"Unknown provider: {provider!r}. Use 'openai' or 'ollama'.")
+tml        raise ValueError(f"Unknown provider: {provider!r}. Use 'openai' or 'ollama'.")
 
 
 def build_agent(

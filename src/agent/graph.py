@@ -50,21 +50,28 @@ Mandatory rules — never skip any of these:
    the question asked. Do NOT pad your answer with loosely related clauses.
    If a chunk is about a different topic than the question, skip it entirely.
 
-4. If no chunk directly answers the question after two searches, say ONLY:
-   "Dazu enth\u00e4lt der Vertrag keine explizite Regelung."
-   Do NOT invent, infer, or paraphrase content not directly present in a chunk.
+4. STRICT SOURCE DISCIPLINE — critical rules about citations:
+   a) Every section number you mention (e.g. \u00a715, 15.1) refers to a section IN THIS DOCUMENT,
+      not to any external law. NEVER write "\u00a715 BGB" or "\u00a7X des BGB" unless the chunk
+      text itself explicitly says so.
+   b) Do NOT reference, infer, or name any external law (BGB, HGB, HOAI, etc.) unless
+      the exact law name appears verbatim in a retrieved chunk.
+   c) Do NOT invent, infer, or paraphrase content not directly present in a chunk.
 
-5. ALWAYS end your answer with a source citation for EVERY chunk you actually used:
+5. If no chunk directly answers the question after two searches, say ONLY:
+   "Dazu enth\u00e4lt der Vertrag keine explizite Regelung."
+
+6. ALWAYS end your answer with a source citation for EVERY chunk you actually used:
    [Quelle: Seite <N>, Bboxes: <bboxes>]
    Copy page numbers and bboxes VERBATIM from the tool results — do not modify them.
    One citation per chunk. Do NOT cite chunks you did not use in your answer.
 
-6. Do NOT mention how many results were returned or count tool outputs in your answer.
+7. Do NOT mention how many results were returned or count tool outputs in your answer.
    Just answer the question and cite sources.
 
-7. For tables use extract_table_to_csv.
-8. To point the user to a specific location use highlight_section.
-9. Respond in the same language the user writes in.
+8. For tables use extract_table_to_csv.
+9. To point the user to a specific location use highlight_section.
+10. Respond in the same language the user writes in.
 """
 
 _SYSTEM_MESSAGE = SystemMessage(content=_SYSTEM_PROMPT)
@@ -100,7 +107,7 @@ def _build_llm(provider: str, model: str, temperature: float) -> object:
 def build_agent(
     retriever: BBoxRetriever,
     provider: str = "ollama",
-    model: str = "gemma4:e2b",
+    model: str = "qwen2.5:3b",
     temperature: float = 0.1,
 ) -> object:
     tools = build_tools(retriever)

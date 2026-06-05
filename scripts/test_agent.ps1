@@ -55,8 +55,8 @@ for query in [
         tool_calls = getattr(msg, "tool_calls", [])
         if tool_calls:
             for tc in tool_calls:
-                print(f"  -> tool_call: {tc[\"name\"]}({tc[\"args\"]})")
-    print(f"ANSWER: {result[\"messages\"][-1].content}")
+                print(f"  -> tool_call: {tc['name']}({tc['args']})")
+    print(f"ANSWER: {result['messages'][-1].content}")
 '@
 
 Write-Host "`nRunning agent debug...`n" -ForegroundColor Cyan

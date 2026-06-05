@@ -1,9 +1,8 @@
-"""Layout-aware chunker that aggregates elements into retrieval-ready Chunks.
+"""Layout-aware chunker with section-boundary splitting.
 
-Splits on:
-1. ODL/PyMuPDF element boundaries (primary)
-2. Section headings (§ N, digits + word) detected via heuristic
-3. max_chars overflow
+Handles both:
+- ODL output: elements are already individual paragraphs (split by element)
+- PyMuPDF output: entire page or section blob in one element (split by section pattern)
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CHARS = 800
 _MIN_CHUNK_CHARS = 40
-_MIN_BBOX_AREA = 50.0  # relaxed from 100 to avoid dropping real content
+_MIN_BBOX_AREA = 50.0
 
 _NOISE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"EVB-IT\s+Dienst", re.IGNORECASE),
@@ -29,34 +28,60 @@ _NOISE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"^\d{1,2}\s+von\s+\d{1,2}$"),
 ]
 
-# Matches section headings like:
-#   "15 Laufzeit und Kündigung"
-#   "§ 15 Laufzeit"
-#   "11 Schlechtleistung"
-_SECTION_RE = re.compile(
-    r"^(?:§\s*)?\d{1,2}(?:\.\d)?\s+[A-ZÄÖÜ][\wäöüÄÖÜ\s\-,]{3,60}$"
+# Matches inline section markers like:
+#   "15 Laufzeit und Kündigung", "11 Schlechtleistung", "§ 7 Mitwirkung"
+# Used to split a blob like "... end of §10. 11 Schlechtleistung Wird ..."
+_INLINE_SECTION_RE = re.compile(
+    r"(?<=[.!?\s])(?:§\s*)?(?P<num>\d{1,2}(?:\.\d)?)\s+"
+    r"(?P<title>[A-Z\u00c4\u00d6\u00dc][\w\u00e4\u00f6\u00fc\u00c4\u00d6\u00dc\s\-,]{3,60}?)\s+(?=[A-Z\u00c4\u00d6\u00dc\w])"
+)
+
+# Standalone heading (entire element is just a heading)
+_HEADING_RE = re.compile(
+    r"^(?:§\s*)?\d{1,2}(?:\.\d)?\s+[A-Z\u00c4\u00d6\u00dc][\w\u00e4\u00f6\u00fc\u00c4\u00d6\u00dc\s\-,]{3,60}$"
 )
 
 
 @dataclass
 class ChunkerConfig:
     max_chars: int = _DEFAULT_MAX_CHARS
-    overlap_chars: int = 80
     min_chunk_chars: int = _MIN_CHUNK_CHARS
     deduplicate: bool = True
-    heading_lookahead: bool = True
 
 
 def _valid_bbox(bbox: list[float]) -> bool:
     if len(bbox) != 4:
         return False
-    x0, y0, x1, y1 = bbox
-    return (x1 - x0) * (y1 - y0) >= _MIN_BBOX_AREA
+    return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]) >= _MIN_BBOX_AREA
 
 
-def _is_section_heading(text: str) -> bool:
-    """True if text looks like a numbered section heading."""
-    return bool(_SECTION_RE.match(text.strip()))
+def _is_standalone_heading(text: str) -> bool:
+    return bool(_HEADING_RE.match(text.strip()))
+
+
+def _split_on_inline_sections(text: str) -> list[tuple[str, bool]]:
+    """Split a text blob at embedded section boundaries.
+
+    Returns list of (fragment, is_heading) tuples.
+    E.g. "...end of ten. 11 Schlechtleistung Wird eine..." becomes:
+        ('...end of ten.', False)
+        ('11 Schlechtleistung', True)
+        ('Wird eine...', False)
+    """
+    parts: list[tuple[str, bool]] = []
+    last = 0
+    for m in _INLINE_SECTION_RE.finditer(text):
+        pre = text[last:m.start()].strip()
+        if pre:
+            parts.append((pre, False))
+        heading = f"{m.group('num')} {m.group('title').strip()}"
+        parts.append((heading, True))
+        last = m.end()
+    tail = text[last:].strip()
+    if tail:
+        parts.append((tail, False))
+    # If no splits found, return as-is
+    return parts if len(parts) > 1 else [(text, False)]
 
 
 class LayoutChunker:
@@ -70,21 +95,12 @@ class LayoutChunker:
         before = len(chunks)
         chunks = self._filter(chunks)
         logger.info(
-            "Chunked %d pages → %d chunks (%d filtered out)",
+            "Chunked %d pages \u2192 %d chunks (%d filtered)",
             len(pages), len(chunks), before - len(chunks),
         )
         return chunks
 
     def _chunk_page(self, page: Page) -> list[Chunk]:
-        """Split a page into chunks, respecting section boundaries.
-
-        Strategy:
-        - Each element is either a heading, table, or body text.
-        - A heading always flushes the current buffer and starts a new chunk
-          (the heading text is prepended to the following body).
-        - A body element that would push the buffer over max_chars flushes first.
-        - Tables are always their own chunk.
-        """
         chunks: list[Chunk] = []
         buf_texts: list[str] = []
         buf_bboxes: list[list[float]] = []
@@ -105,22 +121,18 @@ class LayoutChunker:
                     confidence=min(buf_conf) if buf_conf else 0.8,
                     image_path=page.image_path,
                 ))
-                buf_texts.clear()
-                buf_bboxes.clear()
-                buf_conf.clear()
             elif pending_heading:
-                # Heading with no body yet — emit it alone
-                valid_bboxes = [b for b in buf_bboxes if _valid_bbox(b)]
                 chunks.append(Chunk(
                     text=pending_heading,
                     page_number=page.page_number,
-                    bboxes=valid_bboxes or [],
+                    bboxes=[b for b in buf_bboxes if _valid_bbox(b)],
                     chunk_type="text",
                     confidence=0.90,
                     image_path=page.image_path,
                 ))
-                buf_bboxes.clear()
-                buf_conf.clear()
+            buf_texts.clear()
+            buf_bboxes.clear()
+            buf_conf.clear()
             pending_heading = next_heading
 
         for element in page.elements:
@@ -140,26 +152,28 @@ class LayoutChunker:
                     ))
                 continue
 
-            # Detect section heading in element text
-            # PyMuPDF often merges multiple sections into one element;
-            # split on internal section boundaries too.
-            sub_parts = _split_on_sections(element.text)
+            # Standalone heading element
+            if _is_standalone_heading(element.text):
+                flush(next_heading=element.text)
+                buf_bboxes.append(element.bbox)
+                buf_conf.append(element.confidence)
+                continue
+
+            # Try to split large blobs on inline section markers
+            sub_parts = _split_on_inline_sections(element.text)
 
             for part_text, is_heading in sub_parts:
                 part_text = part_text.strip()
                 if not part_text:
                     continue
-
-                if is_heading or _is_section_heading(part_text):
+                if is_heading:
                     flush(next_heading=part_text)
                     buf_bboxes.append(element.bbox)
                     buf_conf.append(element.confidence)
                     continue
-
-                current_len = sum(len(t) for t in buf_texts)
-                if current_len + len(part_text) > self._cfg.max_chars and buf_texts:
+                cur_len = sum(len(t) for t in buf_texts)
+                if cur_len + len(part_text) > self._cfg.max_chars and buf_texts:
                     flush(next_heading=pending_heading)
-
                 buf_texts.append(part_text)
                 buf_bboxes.append(element.bbox)
                 buf_conf.append(element.confidence)
@@ -183,39 +197,6 @@ class LayoutChunker:
                 seen.add(key)
             out.append(c)
         return out
-
-
-def _split_on_sections(text: str) -> list[tuple[str, bool]]:
-    """Split a multi-section blob into (text, is_heading) pairs.
-
-    Handles PyMuPDF's tendency to return an entire page as one element
-    with embedded section markers like '15 Laufzeit und Kündigung ...'.
-
-    Returns list of (text_fragment, is_heading) tuples.
-    """
-    # Split on lines that look like section headings
-    lines = text.split("\n")
-    if len(lines) <= 1:
-        return [(text, False)]
-
-    parts: list[tuple[str, bool]] = []
-    buf: list[str] = []
-
-    for line in lines:
-        stripped = line.strip()
-        if _is_section_heading(stripped):
-            if buf:
-                parts.append((" ".join(buf), False))
-                buf = []
-            parts.append((stripped, True))
-        else:
-            if stripped:
-                buf.append(stripped)
-
-    if buf:
-        parts.append((" ".join(buf), False))
-
-    return parts if parts else [(text, False)]
 
 
 def _is_noise(text: str) -> bool:

@@ -11,18 +11,16 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CHARS = 1000
 _MIN_CHUNK_CHARS = 60
+_MIN_BBOX_AREA = 100.0  # drop bboxes with area < 100 PDF points² (noise / zero-area)
 
 _NOISE_PATTERNS: list[re.Pattern[str]] = [
-    # page headers/footers
     re.compile(r"EVB-IT\s+Dienst", re.IGNORECASE),
     re.compile(r"^Seite\s+\d+\s+von\s+\d+", re.IGNORECASE),
     re.compile(r"Version\s+\d+\.\d+\s+vom", re.IGNORECASE),
     re.compile(r"Die mit \* gekennzeichneten", re.IGNORECASE),
     re.compile(r"^Vertragsnummer.{0,50}$"),
     re.compile(r"^\s*_+\s*$"),
-    # TOC dot-lines
     re.compile(r"\.{5,}"),
-    # standalone section numbers / page refs
     re.compile(r"^\d{1,2}\s+von\s+\d{1,2}$"),
 ]
 
@@ -38,6 +36,15 @@ class ChunkerConfig:
     overlap_chars: int = 100
     min_chunk_chars: int = _MIN_CHUNK_CHARS
     deduplicate: bool = True
+
+
+def _valid_bbox(bbox: list[float]) -> bool:
+    """Return True if bbox has 4 coords and a non-trivial area."""
+    if len(bbox) != 4:
+        return False
+    x0, y0, x1, y1 = bbox
+    area = (x1 - x0) * (y1 - y0)
+    return area >= _MIN_BBOX_AREA
 
 
 class LayoutChunker:
@@ -66,10 +73,12 @@ class LayoutChunker:
             if not buffer_texts:
                 return
             text = " ".join(buffer_texts)
+            # Only keep bboxes with valid area
+            valid_bboxes = [b for b in buffer_bboxes if _valid_bbox(b)]
             chunks.append(Chunk(
                 text=text,
                 page_number=page.page_number,
-                bboxes=list(buffer_bboxes),
+                bboxes=valid_bboxes,
                 chunk_type="text",
                 confidence=min(buffer_confidence),
                 image_path=page.image_path,
@@ -83,14 +92,21 @@ class LayoutChunker:
                 continue
             if element.type == "table":
                 flush()
-                chunks.append(Chunk(
-                    text=element.text,
-                    page_number=page.page_number,
-                    bboxes=[element.bbox],
-                    chunk_type="table",
-                    confidence=element.confidence,
-                    image_path=page.image_path,
-                ))
+                bbox = element.bbox
+                if _valid_bbox(bbox):
+                    chunks.append(Chunk(
+                        text=element.text,
+                        page_number=page.page_number,
+                        bboxes=[bbox],
+                        chunk_type="table",
+                        confidence=element.confidence,
+                        image_path=page.image_path,
+                    ))
+                else:
+                    logger.warning(
+                        "Dropping table element on page %d — invalid bbox %s",
+                        page.page_number, bbox,
+                    )
                 continue
             if self._is_heading(element) and buffer_texts:
                 flush()
@@ -112,6 +128,10 @@ class LayoutChunker:
             if len(stripped) < self._cfg.min_chunk_chars:
                 continue
             if _is_noise(stripped):
+                continue
+            # Drop chunks whose bboxes are all invalid (nothing to highlight)
+            if not c.bboxes:
+                logger.debug("Dropping chunk with no valid bboxes: %.60s", stripped)
                 continue
             if self._cfg.deduplicate:
                 key = re.sub(r"\s+", " ", stripped.lower())

@@ -39,10 +39,13 @@ class ToolResult:
     image_path: str
 
     def __str__(self) -> str:
+        # Include ALL bboxes and the full image_path so app.py can parse them
+        # without having to reconstruct paths independently.
         return (
             f"{self.content}\n"
             f"[source: page {self.page_number}, "
-            f"bboxes={self.bboxes[:2]}{'...' if len(self.bboxes) > 2 else ''}]"
+            f"bboxes={self.bboxes}, "
+            f"image_path={self.image_path!r}]"
         )
 
 

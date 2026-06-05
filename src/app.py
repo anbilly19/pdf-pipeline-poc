@@ -41,7 +41,7 @@ def _init_session() -> None:
         "agent": None,
         "indexed_doc": None,
         "overlay_source": None,
-        "latest_sources": [],  # sources from the most recent query
+        "latest_sources": [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -143,7 +143,6 @@ def main() -> None:
                         answer = last.content
                     st.markdown(answer)
                 sources = _extract_sources_from_messages(result["messages"])
-                # Store latest sources and auto-show first one in page view
                 st.session_state.latest_sources = sources
                 if sources:
                     st.session_state.overlay_source = sources[0]
@@ -152,11 +151,9 @@ def main() -> None:
                 )
                 st.rerun()
 
-    # view_col: rendered once per page load with stable button keys
     with view_col:
         st.subheader("Page View")
 
-        # Source pills — stable keys based on index, not uuid
         latest_sources = st.session_state.get("latest_sources", [])
         if latest_sources:
             st.caption("Sources (latest query):")
@@ -173,25 +170,33 @@ def main() -> None:
             if img:
                 st.image(img, caption=f"Page {src['page']}", use_container_width=True)
             else:
-                st.info("Page image not rendered yet — index the document first.")
+                st.warning(
+                    f"Page {src['page']} image not found at `{src['image_path']}`. "
+                    "Re-index the document to regenerate page images."
+                )
         else:
             st.info("Source pages will appear here after a query.")
 
 
 def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, object]]:
-    """Parse [source: page N, bboxes=[[...]]] annotations from tool messages.
+    """Parse ToolResult annotations from tool messages.
+
+    Format emitted by ToolResult.__str__:
+        [source: page N, bboxes=[[...]], image_path='...']
 
     Returns at most _MAX_SOURCE_PILLS unique pages, in order of appearance.
     """
     from langchain_core.messages import ToolMessage  # noqa: PLC0415
     import re, ast  # noqa: PLC0415, E401
+
     sources: list[dict[str, object]] = []
     seen_pages: set[int] = set()
+
     for msg in messages:
         if not isinstance(msg, ToolMessage):
             continue
         for match in re.finditer(
-            r"\[source: page (\d+), bboxes=(\[\[.*?\]\])",
+            r"\[source: page (\d+), bboxes=(\[\[.*?\]\]), image_path=('.*?'|\".*?\")",
             str(msg.content),
             re.DOTALL,
         ):
@@ -202,7 +207,12 @@ def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, obj
                 if page in seen_pages:
                     continue
                 bboxes = ast.literal_eval(match.group(2))
-                image_path = _find_image_path(page)
+                image_path = ast.literal_eval(match.group(3))  # strips quotes correctly
+                # Fallback: if image_path is empty or missing, try to locate it
+                if not image_path or not Path(image_path).exists():
+                    fallback = OUTPUT_DIR / "pages" / f"page_{page:04d}.png"
+                    if fallback.exists():
+                        image_path = str(fallback)
                 sources.append({"page": page, "bboxes": bboxes, "image_path": image_path})
                 seen_pages.add(page)
             except Exception:  # noqa: BLE001
@@ -210,11 +220,6 @@ def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, obj
         if len(sources) >= _MAX_SOURCE_PILLS:
             break
     return sources
-
-
-def _find_image_path(page_number: int) -> str:
-    path = OUTPUT_DIR / "pages" / f"page_{page_number:04d}.png"
-    return str(path) if path.exists() else ""
 
 
 if __name__ == "__main__":

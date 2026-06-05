@@ -9,7 +9,6 @@ Returns a DocTypeConfig that is persisted to outputs/faiss_index/domain_config.j
 from __future__ import annotations
 
 import logging
-import re
 from typing import TYPE_CHECKING
 
 from src.agent.domain_config import DocTypeConfig, list_available_doc_types, load_doc_type, save_active_config
@@ -19,8 +18,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_SAMPLE_CHUNKS = 15       # number of chunks to sample for classification
-_KW_THRESHOLD = 3         # min keyword hits to accept a doc type without LLM
+_SAMPLE_CHUNKS = 15
+_KW_THRESHOLD = 3
 _LLM_FALLBACK_MODEL = "qwen2.5:3b"
 
 
@@ -49,17 +48,15 @@ def _classify_by_keywords(sample_text: str) -> tuple[str, int]:
 def _classify_by_llm(sample_text: str, provider: str, model: str) -> str:
     """Ask an LLM to classify the document type.
 
-    Returns one of the available doc type strings.
+    Returns one of the available doc type strings, or 'fallback' on failure.
     """
     available = [t for t in list_available_doc_types() if t != "fallback"]
     options_str = ", ".join(available)
-
     prompt = (
         f"Classify this document into exactly one of these types: {options_str}.\n"
         f"Respond with ONLY the type name, nothing else.\n\n"
         f"Document excerpt:\n{sample_text[:2000]}"
     )
-
     try:
         if provider == "openai":
             import os  # noqa: PLC0415
@@ -68,17 +65,14 @@ def _classify_by_llm(sample_text: str, provider: str, model: str) -> str:
         else:
             from langchain_ollama import ChatOllama  # noqa: PLC0415
             llm = ChatOllama(model=model, temperature=0.0)
-
         response = llm.invoke(prompt)
         raw = response.content.strip().lower()
-        # Extract first matching doc type from response
         for doc_type in available:
             if doc_type in raw:
                 logger.info("LLM classified document as: %s", doc_type)
                 return doc_type
     except Exception as e:  # noqa: BLE001
         logger.warning("LLM classification failed: %s", e)
-
     return "fallback"
 
 
@@ -91,21 +85,20 @@ def classify_document(
     """Classify a document from its chunks and return the matching DocTypeConfig.
 
     Strategy:
-    1. Sample first N chunks into a text blob.
-    2. Score all doc types by keyword hit count.
-    3. If best score >= threshold: accept without LLM.
-    4. Otherwise: call LLM classifier for a final decision.
-    5. Persist the result to outputs/faiss_index/domain_config.json.
-
-    Args:
-        chunks: All chunks from the indexed document.
-        provider: LLM provider for fallback ('ollama' or 'openai').
-        model: Model name for LLM fallback classification.
-        save: Whether to persist the config to disk.
-
-    Returns:
-        The matching DocTypeConfig.
+    1. Empty chunks -> immediate fallback.
+    2. Sample first N chunks into a text blob.
+    3. Score all doc types by keyword hit count.
+    4. If best score >= threshold: accept without LLM.
+    5. Otherwise: call LLM classifier (exceptions caught here too, return fallback).
+    6. Persist the result to outputs/faiss_index/domain_config.json.
     """
+    if not chunks:
+        logger.warning("No chunks provided, returning fallback doc type")
+        config = load_doc_type("fallback")
+        if save:
+            save_active_config(config)
+        return config
+
     sample = chunks[:_SAMPLE_CHUNKS]
     sample_text = "\n".join(c.text for c in sample)
 
@@ -114,7 +107,11 @@ def classify_document(
 
     if score < _KW_THRESHOLD:
         logger.info("Score below threshold, falling back to LLM classifier")
-        doc_type = _classify_by_llm(sample_text, provider=provider, model=model)
+        try:
+            doc_type = _classify_by_llm(sample_text, provider=provider, model=model)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("LLM classifier raised unexpectedly: %s - using fallback", e)
+            doc_type = "fallback"
 
     config = load_doc_type(doc_type)
     logger.info("Document classified as: %s (%s)", config.doc_type, config.display_name)

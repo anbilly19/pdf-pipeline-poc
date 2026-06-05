@@ -1,4 +1,9 @@
-"""LangGraph ReAct agent graph — supports OpenAI and Ollama at runtime."""
+"""LangGraph ReAct agent graph.
+
+Supports OpenAI and Ollama at runtime.
+The system prompt and model are injected at build time from a DomainSpec,
+enabling the router to select the right specialist per query.
+"""
 from __future__ import annotations
 
 import logging
@@ -13,38 +18,20 @@ from typing_extensions import Annotated, TypedDict
 
 from src.retrieval.retriever import BBoxRetriever
 from src.agent.tools import build_tools
+from src.agent.domain_config import DomainSpec
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM_PROMPT = """Du bist ein Dokumentenassistent f\u00fcr deutsche Vertr\u00e4ge.
+_DEFAULT_SYSTEM_PROMPT = """Du bist ein Dokumentenassistent.
 
 REGELN:
-
-1. Rufe IMMER zuerst search_term auf mit top_k=10 und deutschen Schl\u00fcsselw\u00f6rtern.
-   Beispiele: "Verz\u00f6gerung Frist", "K\u00fcndigung Laufzeit", "Vertragsstrafe".
-
+1. Rufe IMMER zuerst search_term auf mit top_k=10 und passenden Schl\u00fcsselw\u00f6rtern.
 2. Lies ALLE zur\u00fcckgegebenen Textabschnitte vollst\u00e4ndig durch.
-   Der relevante Abschnitt kann weiter unten in der Liste stehen.
-   Zitiere ihn w\u00f6rtlich in deiner Antwort.
-
-3. Wenn ein Abschnitt die Frage teilweise beantwortet, rufe search_term
-   ein zweites Mal mit anderen Schl\u00fcsselw\u00f6rtern auf.
-
-4. Antworte NUR mit Inhalten aus den Tool-Ergebnissen.
-   Erw\u00e4hne KEINE Gesetze oder Paragraphen, die nicht im gefundenen Text stehen.
-   Erfinde NICHTS.
-
-5. Wenn kein Abschnitt die Frage beantwortet:
-   "Dazu enth\u00e4lt der Vertrag keine explizite Regelung."
-
-6. Beende jede Antwort mit:
-   [Quelle: Seite <N>, Bboxes: <bboxes>]
-   Kopiere Seitenzahl und Bboxes exakt aus den Tool-Ergebnissen.
-
-7. Antworte in der Sprache der Frage.
+3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen. Erfinde nichts.
+4. Wenn kein Abschnitt die Frage beantwortet: 'Dazu enth\u00e4lt das Dokument keine explizite Information.'
+5. Beende jede Antwort mit: [Quelle: Seite <N>, Bboxes: <bboxes>]
+6. Antworte in der Sprache der Frage.
 """
-
-_SYSTEM_MESSAGE = SystemMessage(content=_SYSTEM_PROMPT)
 
 
 class AgentState(TypedDict):
@@ -74,15 +61,31 @@ def build_agent(
     provider: str = "ollama",
     model: str = "qwen2.5:3b",
     temperature: float = 0.1,
+    domain_spec: DomainSpec | None = None,
 ) -> object:
+    """Build and compile a LangGraph ReAct agent.
+
+    Args:
+        retriever: FAISS-backed retriever supplying the search_term tool.
+        provider: LLM provider ('ollama' or 'openai').
+        model: Model name. Overridden by domain_spec.model if provided.
+        temperature: Sampling temperature.
+        domain_spec: If provided, uses its system_prompt and model.
+                     Falls back to _DEFAULT_SYSTEM_PROMPT and model arg.
+    """
+    effective_model = domain_spec.model if domain_spec else model
+    effective_prompt = domain_spec.system_prompt if domain_spec else _DEFAULT_SYSTEM_PROMPT
+    domain_name = domain_spec.name if domain_spec else "general"
+
     tools = build_tools(retriever)
-    llm = _build_llm(provider, model, temperature)
+    llm = _build_llm(provider, effective_model, temperature)
     llm_with_tools = llm.bind_tools(tools)  # type: ignore[union-attr]
     tool_node = ToolNode(tools)
+    system_message = SystemMessage(content=effective_prompt)
 
     def agent_node(state: AgentState) -> dict[str, list[BaseMessage]]:
         turn_messages = _current_turn_messages(state["messages"])
-        response = llm_with_tools.invoke([_SYSTEM_MESSAGE] + turn_messages)
+        response = llm_with_tools.invoke([system_message] + turn_messages)
         return {"messages": [response]}
 
     def should_continue(state: AgentState) -> Literal["tools", "end"]:
@@ -100,7 +103,8 @@ def build_agent(
 
     compiled = graph.compile()
     logger.info(
-        "Agent compiled (provider=%s, model=%s, tracing=%s, stateless=True)",
-        provider, model, os.getenv("LANGCHAIN_TRACING_V2", "false"),
+        "Agent compiled (provider=%s, model=%s, domain=%s, tracing=%s)",
+        provider, effective_model, domain_name,
+        os.getenv("LANGCHAIN_TRACING_V2", "false"),
     )
     return compiled

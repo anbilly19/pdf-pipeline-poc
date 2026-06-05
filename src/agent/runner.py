@@ -1,7 +1,7 @@
 """CLI runner — smoke-test before the UI."""
 from __future__ import annotations
 
-# Must be first import — silences transformers __path__ spam before any model loads
+# Must be first import — silences transformers __path__ spam
 import src.silence  # noqa: F401
 
 import argparse
@@ -14,6 +14,8 @@ load_dotenv()
 from langchain_core.messages import HumanMessage
 
 from src.agent.graph import build_agent
+from src.agent.router import route_query
+from src.agent.domain_config import load_active_config
 from src.retrieval.embedder import ChunkEmbedder
 from src.retrieval.retriever import BBoxRetriever
 from src.retrieval.store import FAISSStore
@@ -23,17 +25,17 @@ logger = logging.getLogger(__name__)
 
 
 def run_cli(provider: str = "ollama", model: str = "gemma4:e2b") -> None:
-    """Start an interactive CLI session."""
+    """Start an interactive CLI session with domain-aware routing."""
     if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set.")
 
     embedder = ChunkEmbedder()
     store = FAISSStore()
     retriever = BBoxRetriever(store=store, embedder=embedder, top_k=5)
-    agent = build_agent(retriever=retriever, provider=provider, model=model)
+    doc_config = load_active_config()
 
     tracing = os.getenv("LANGCHAIN_TRACING_V2", "false")
-    print(f"\nPDF Agent ready (provider={provider}, model={model}, tracing={tracing})")
+    print(f"\nPDF Agent ready (provider={provider}, doc_type={doc_config.doc_type}, tracing={tracing})")
     print("Type 'exit' to quit.\n")
 
     while True:
@@ -47,9 +49,18 @@ def run_cli(provider: str = "ollama", model: str = "gemma4:e2b") -> None:
             break
         if not user_input:
             continue
-        result = agent.invoke(
-            {"messages": [HumanMessage(content=user_input)]},
+
+        # Route query to best domain specialist
+        domain_spec = route_query(user_input, config=doc_config)
+        print(f"  [domain: {domain_spec.display_name} | model: {domain_spec.model}]")
+
+        agent = build_agent(
+            retriever=retriever,
+            provider=provider,
+            model=model,
+            domain_spec=domain_spec,
         )
+        result = agent.invoke({"messages": [HumanMessage(content=user_input)]})
         print(f"\nAssistant: {result['messages'][-1].content}\n")
 
 

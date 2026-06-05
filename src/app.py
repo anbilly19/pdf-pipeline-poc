@@ -1,13 +1,41 @@
 """Streamlit frontend for the PDF Q&A pipeline."""
 from __future__ import annotations
 
+# ---------------------------------------------------------------------------
+# Noise suppression — must happen before ANY other import that touches
+# transformers/sentence-transformers, because those libraries register their
+# loggers and emit __path__ warnings at import time.
+# ---------------------------------------------------------------------------
 import logging
 import os
 import warnings
-from pathlib import Path
 
-warnings.filterwarnings("ignore", message="Accessing `__path__`", module="transformers")
-logging.getLogger("transformers").setLevel(logging.ERROR)
+# 1. Suppress Python warnings
+warnings.filterwarnings("ignore", message=r"Accessing `__path__`")
+warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
+
+# 2. Tell transformers to stay quiet before it initialises its own logger
+os.environ.setdefault("TRANSFORMERS_VERBOSITY", "error")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+# 3. Set levels on known noisy loggers early
+for _noisy in ("transformers", "sentence_transformers", "huggingface_hub"):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
+
+
+class _TransformersPathFilter(logging.Filter):
+    """Drop the hundreds of '[transformers] Accessing `__path__`' lines."""
+    def filter(self, record: logging.LogRecord) -> bool:
+        return "Accessing `__path__`" not in record.getMessage()
+
+
+# Attach filter to root logger so it catches every handler
+logging.getLogger().addFilter(_TransformersPathFilter())
+
+# ---------------------------------------------------------------------------
+# Normal imports
+# ---------------------------------------------------------------------------
+from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -22,6 +50,11 @@ from src.retrieval.store import FAISSStore
 from src.ui.overlay import render_page_with_bboxes
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+# Re-apply after basicConfig (it may add a new handler)
+logging.getLogger().addFilter(_TransformersPathFilter())
+for _noisy in ("transformers", "sentence_transformers", "huggingface_hub"):
+    logging.getLogger(_noisy).setLevel(logging.ERROR)
+
 logger = logging.getLogger(__name__)
 
 OUTPUT_DIR = Path("outputs")
@@ -56,8 +89,6 @@ def _get_shared_components() -> tuple[FAISSStore, ChunkEmbedder]:
 
 
 def _clear_index(store: FAISSStore) -> None:
-    """Wipe persisted FAISS index files so stale chunks from a previous
-    document cannot bleed into a freshly uploaded one."""
     index_dir = OUTPUT_DIR / "faiss_index"
     for f in index_dir.glob("*"):
         try:
@@ -179,13 +210,6 @@ def main() -> None:
 
 
 def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, object]]:
-    """Parse ToolResult annotations from tool messages.
-
-    Format emitted by ToolResult.__str__:
-        [source: page N, bboxes=[[...]], image_path='...']
-
-    Returns at most _MAX_SOURCE_PILLS unique pages, in order of appearance.
-    """
     from langchain_core.messages import ToolMessage  # noqa: PLC0415
     import re, ast  # noqa: PLC0415, E401
 
@@ -207,8 +231,7 @@ def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, obj
                 if page in seen_pages:
                     continue
                 bboxes = ast.literal_eval(match.group(2))
-                image_path = ast.literal_eval(match.group(3))  # strips quotes correctly
-                # Fallback: if image_path is empty or missing, try to locate it
+                image_path = ast.literal_eval(match.group(3))
                 if not image_path or not Path(image_path).exists():
                     fallback = OUTPUT_DIR / "pages" / f"page_{page:04d}.png"
                     if fallback.exists():

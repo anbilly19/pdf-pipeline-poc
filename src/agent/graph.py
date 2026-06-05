@@ -21,7 +21,7 @@ _SYSTEM_PROMPT = """Du bist ein Dokumentenassistent f\u00fcr deutsche Vertr\u00e
 REGELN (alle zwingend):
 
 1. Rufe IMMER zuerst search_term mit deutschen Schl\u00fcsselw\u00f6rtern auf, bevor du antwortest.
-   - Suche nach dem genauen Begriff aus der Frage (z.B. "Verz\u00fcgerung", "K\u00fcndigung", "Laufzeit").
+   - Suche nach dem genauen Begriff aus der Frage (z.B. "Verz\u00f6gerung", "K\u00fcndigung", "Laufzeit").
    - Falls die erste Suche keine passenden Ergebnisse liefert, suche nochmal mit anderen Begriffen.
 
 2. Beantworte die Frage NUR mit dem Text aus den Tool-Ergebnissen.
@@ -67,7 +67,7 @@ def _build_llm(provider: str, model: str, temperature: float) -> object:
         from langchain_ollama import ChatOllama  # noqa: PLC0415
         return ChatOllama(model=model, temperature=temperature)
     else:
-tml        raise ValueError(f"Unknown provider: {provider!r}. Use 'openai' or 'ollama'.")
+        raise ValueError(f"Unknown provider: {provider!r}. Use 'openai' or 'ollama'.")
 
 
 def build_agent(

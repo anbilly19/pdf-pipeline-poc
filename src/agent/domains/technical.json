@@ -1,0 +1,42 @@
+{
+  "doc_type": "technical",
+  "display_name": "Technical Manual / Specification",
+  "detection_hints": [
+    "Handbuch", "Spezifikation", "Anleitung", "Installation", "Konfiguration", "Wartung",
+    "manual", "specification", "installation", "configuration", "maintenance", "API"
+  ],
+  "domains": {
+    "specifications": {
+      "display_name": "Technische Spezifikationen",
+      "keywords_de": ["Spezifikation", "Parameter", "Anforderung", "Schnittstelle", "Format"],
+      "keywords_en": ["specification", "parameter", "requirement", "interface", "format"],
+      "search_terms": ["Spezifikation Parameter Anforderung", "specification requirement interface"],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein technischer Experte.\n\nREGELN:\n1. Rufe search_term mit technischen Schlüsselbegriffen auf (top_k=10).\n2. Zitiere alle technischen Werte, Parameter und Anforderungen wörtlich.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen."
+    },
+    "installation": {
+      "display_name": "Installation & Setup",
+      "keywords_de": ["Installation", "Setup", "Einrichtung", "Schritt", "Voraussetzung"],
+      "keywords_en": ["install", "setup", "configure", "step", "prerequisite"],
+      "search_terms": ["Installation Setup Einrichtung", "install configure step"],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein Installationsexperte.\n\nREGELN:\n1. Rufe search_term mit 'Installation Setup' auf (top_k=10).\n2. Liste alle Schritte in der richtigen Reihenfolge auf.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen."
+    },
+    "troubleshooting": {
+      "display_name": "Fehlerbehebung",
+      "keywords_de": ["Fehler", "Problem", "Lösung", "Fehlerbehebung", "Ursache"],
+      "keywords_en": ["error", "problem", "solution", "troubleshoot", "cause", "fix"],
+      "search_terms": ["Fehler Problem Lösung", "error troubleshoot fix"],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein Experte für technische Fehlerbehebung.\n\nREGELN:\n1. Rufe search_term mit dem Fehlerbegriff auf (top_k=10).\n2. Beschreibe Ursache und Lösung basierend auf dem gefundenen Text.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen."
+    },
+    "general": {
+      "display_name": "Allgemein",
+      "keywords_de": [],
+      "keywords_en": [],
+      "search_terms": [],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein technischer Dokumentenassistent.\n\nREGELN:\n1. Rufe search_term mit passenden Schlüsselwörtern auf (top_k=10).\n2. Lies alle zurückgegebenen Abschnitte vollständig durch.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen. Erfinde nichts."
+    }
+  }
+}

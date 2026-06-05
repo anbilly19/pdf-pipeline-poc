@@ -1,0 +1,50 @@
+{
+  "doc_type": "magazine",
+  "display_name": "Magazine / Report",
+  "detection_hints": [
+    "Ausgabe", "Heft", "Redaktion", "Impressum", "Jahrgang", "Verlag",
+    "editorial", "issue", "edition", "publisher", "magazine"
+  ],
+  "domains": {
+    "market_data": {
+      "display_name": "Marktdaten & Trends",
+      "keywords_de": ["Umsatz", "Markt", "Wachstum", "Absatz", "Preis", "Menge", "Prozent"],
+      "keywords_en": ["revenue", "market", "growth", "sales", "volume", "price", "percent"],
+      "search_terms": ["Umsatz Wachstum Markt", "Absatz Preis Menge"],
+      "model": "gemma4:e2b",
+      "system_prompt": "Du bist ein Analyst für Marktdaten und Branchentrends.\n\nREGELN:\n1. Rufe search_term mit den Begriffen 'Umsatz Wachstum Markt' auf (top_k=10).\n2. Zitiere alle Zahlen, Prozentsätze und Vergleiche wörtlich.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen."
+    },
+    "company_news": {
+      "display_name": "Unternehmensnachrichten",
+      "keywords_de": ["Unternehmen", "Umsatz", "Ergebnis", "CEO", "Investition", "Übernahme"],
+      "keywords_en": ["company", "revenue", "result", "acquisition", "investment", "CEO"],
+      "search_terms": ["Unternehmen Ergebnis Umsatz", "Übernahme Investition"],
+      "model": "gemma4:e2b",
+      "system_prompt": "Du bist ein Analyst für Unternehmensnachrichten.\n\nREGELN:\n1. Rufe search_term mit dem Firmennamen oder 'Unternehmen Ergebnis' auf (top_k=10).\n2. Zitiere alle relevanten Zahlen und Fakten wörtlich.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen."
+    },
+    "products": {
+      "display_name": "Produkte & Innovationen",
+      "keywords_de": ["Produkt", "Neuheit", "Innovation", "Sortiment", "Launch", "Marke"],
+      "keywords_en": ["product", "launch", "innovation", "brand", "new", "range"],
+      "search_terms": ["Produkt Neuheit Innovation", "Marke Launch Sortiment"],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein Experte für Produkt- und Innovationsnachrichten.\n\nREGELN:\n1. Rufe search_term mit dem Produktnamen oder 'Produkt Neuheit' auf (top_k=10).\n2. Fasse alle gefundenen Produktinfos präzise zusammen.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen."
+    },
+    "events": {
+      "display_name": "Messen & Events",
+      "keywords_de": ["Messe", "ISM", "Aussteller", "Besucher", "Award", "Veranstaltung"],
+      "keywords_en": ["fair", "trade show", "exhibitor", "visitor", "award", "event"],
+      "search_terms": ["Messe Aussteller Besucher", "ISM Award Veranstaltung"],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein Experte für Messen und Branchenevents.\n\nREGELN:\n1. Rufe search_term mit dem Event-Namen oder 'Messe Aussteller' auf (top_k=10).\n2. Fasse alle relevanten Fakten zur Veranstaltung zusammen.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen."
+    },
+    "general": {
+      "display_name": "Allgemein",
+      "keywords_de": [],
+      "keywords_en": [],
+      "search_terms": [],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein Dokumentenassistent.\n\nREGELN:\n1. Rufe search_term mit passenden Schlüsselwörtern auf (top_k=10).\n2. Lies alle zurückgegebenen Abschnitte vollständig durch.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen. Erfinde nichts."
+    }
+  }
+}

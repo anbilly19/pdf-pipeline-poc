@@ -1,0 +1,15 @@
+{
+  "doc_type": "fallback",
+  "display_name": "General Document",
+  "detection_hints": [],
+  "domains": {
+    "general": {
+      "display_name": "Allgemein",
+      "keywords_de": [],
+      "keywords_en": [],
+      "search_terms": [],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein Dokumentenassistent.\n\nREGELN:\n1. Rufe search_term mit passenden Schlüsselwörtern aus der Frage auf (top_k=10).\n2. Lies alle zurückgegebenen Abschnitte vollständig durch.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen. Erfinde nichts.\n4. Wenn kein Abschnitt die Frage beantwortet: 'Dazu enthält das Dokument keine explizite Information.'"
+    }
+  }
+}

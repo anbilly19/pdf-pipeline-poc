@@ -1,0 +1,58 @@
+{
+  "doc_type": "contract",
+  "display_name": "Legal Contract",
+  "detection_hints": [
+    "Vertrag", "Vereinbarung", "Klausel", "Paragraph", "Vertragspartei",
+    "agreement", "clause", "party", "obligation", "liability"
+  ],
+  "domains": {
+    "deadlines": {
+      "display_name": "Fristen & Verzug",
+      "keywords_de": ["Frist", "Verzug", "Reaktionszeit", "Vertragsstrafe", "Verzögerung", "Termin"],
+      "keywords_en": ["deadline", "delay", "penalty", "response time", "overdue"],
+      "search_terms": ["Verzug Frist Reaktionszeit", "Vertragsstrafe Termin"],
+      "model": "gemma4:e2b",
+      "system_prompt": "Du bist ein Vertragsexperte für Fristen und Verzug.\n\nREGELN:\n1. Rufe search_term mit den Begriffen 'Verzug Frist Reaktionszeit' auf (top_k=10).\n2. Zitiere alle gefundenen Fristen und Zeitangaben wörtlich aus dem Text.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen. Erfinde keine Paragraphen."
+    },
+    "termination": {
+      "display_name": "Kündigung & Laufzeit",
+      "keywords_de": ["Kündigung", "Laufzeit", "Vertragsende", "Verlängerung", "Kündigungsfrist"],
+      "keywords_en": ["termination", "notice", "contract duration", "renewal", "expiry"],
+      "search_terms": ["Kündigung Laufzeit Vertragsende", "Kündigungsfrist Verlängerung"],
+      "model": "gemma4:e2b",
+      "system_prompt": "Du bist ein Vertragsexperte für Kündigung und Laufzeit.\n\nREGELN:\n1. Rufe search_term mit den Begriffen 'Kündigung Laufzeit Vertragsende' auf (top_k=10).\n2. Zitiere alle Fristen, Daten und Bedingungen wörtlich aus dem Text.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen. Erfinde keine Paragraphen."
+    },
+    "payment": {
+      "display_name": "Vergütung & Zahlung",
+      "keywords_de": ["Vergütung", "Zahlung", "Preis", "Pauschale", "Aufwand", "Rechnung"],
+      "keywords_en": ["payment", "remuneration", "invoice", "fee", "price", "cost"],
+      "search_terms": ["Vergütung Zahlung Preis Pauschale", "Aufwand Rechnung"],
+      "model": "gemma4:e2b",
+      "system_prompt": "Du bist ein Vertragsexperte für Vergütung und Zahlungsbedingungen.\n\nREGELN:\n1. Rufe search_term mit den Begriffen 'Vergütung Zahlung Preis' auf (top_k=10).\n2. Zitiere alle Beträge, Fristen und Konditionen wörtlich.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen. Erfinde keine Paragraphen."
+    },
+    "liability": {
+      "display_name": "Haftung & Gewährleistung",
+      "keywords_de": ["Haftung", "Gewährleistung", "Schaden", "Schadensersatz", "Mängel"],
+      "keywords_en": ["liability", "warranty", "damages", "defect", "indemnity"],
+      "search_terms": ["Haftung Gewährleistung Schaden", "Schadensersatz Mängel"],
+      "model": "gemma4:e2b",
+      "system_prompt": "Du bist ein Vertragsexperte für Haftung und Gewährleistung.\n\nREGELN:\n1. Rufe search_term mit den Begriffen 'Haftung Gewährleistung Schaden' auf (top_k=10).\n2. Zitiere alle Haftungsregelungen und Grenzen wörtlich.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen. Erfinde keine Paragraphen."
+    },
+    "data_privacy": {
+      "display_name": "Datenschutz",
+      "keywords_de": ["Datenschutz", "DSGVO", "personenbezogen", "Auftragsverarbeitung"],
+      "keywords_en": ["data protection", "GDPR", "personal data", "privacy"],
+      "search_terms": ["Datenschutz DSGVO personenbezogen", "Auftragsverarbeitung"],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein Experte für Datenschutz in Verträgen.\n\nREGELN:\n1. Rufe search_term mit den Begriffen 'Datenschutz DSGVO' auf (top_k=10).\n2. Zitiere alle datenschutzrelevanten Regelungen wörtlich.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen."
+    },
+    "general": {
+      "display_name": "Allgemein",
+      "keywords_de": [],
+      "keywords_en": [],
+      "search_terms": [],
+      "model": "qwen2.5:3b",
+      "system_prompt": "Du bist ein Dokumentenassistent.\n\nREGELN:\n1. Rufe search_term mit passenden Schlüsselwörtern auf (top_k=10).\n2. Lies alle zurückgegebenen Abschnitte vollständig durch.\n3. Antworte NUR mit Inhalten aus den Tool-Ergebnissen. Erfinde nichts."
+    }
+  }
+}

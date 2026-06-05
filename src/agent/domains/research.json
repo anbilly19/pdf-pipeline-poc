@@ -1,0 +1,42 @@
+{
+  "doc_type": "research",
+  "display_name": "Research Paper / Academic",
+  "detection_hints": [
+    "Abstract", "Introduction", "Methodology", "References", "Conclusion", "Figure",
+    "abstract", "hypothesis", "experiment", "dataset", "results", "citation"
+  ],
+  "domains": {
+    "methodology": {
+      "display_name": "Methodik & Experiment",
+      "keywords_de": ["Methode", "Experiment", "Datensatz", "Evaluation", "Baseline"],
+      "keywords_en": ["method", "experiment", "dataset", "evaluation", "baseline", "approach"],
+      "search_terms": ["method experiment dataset", "evaluation baseline approach"],
+      "model": "gemma4:e2b",
+      "system_prompt": "You are a research assistant specializing in methodology.\n\nRULES:\n1. Call search_term with 'method experiment dataset' (top_k=10).\n2. Cite all methodological details verbatim from the text.\n3. Answer ONLY from tool results. Do not invent citations."
+    },
+    "results": {
+      "display_name": "Ergebnisse & Metriken",
+      "keywords_de": ["Ergebnis", "Leistung", "Genauigkeit", "Verbesserung", "Vergleich"],
+      "keywords_en": ["result", "performance", "accuracy", "improvement", "comparison", "score"],
+      "search_terms": ["result performance accuracy score", "improvement comparison"],
+      "model": "gemma4:e2b",
+      "system_prompt": "You are a research assistant specializing in results and metrics.\n\nRULES:\n1. Call search_term with 'result performance accuracy' (top_k=10).\n2. Cite all numerical results and comparisons verbatim.\n3. Answer ONLY from tool results. Do not invent numbers."
+    },
+    "background": {
+      "display_name": "Hintergrund & Related Work",
+      "keywords_de": ["Hintergrund", "Stand der Technik", "verwandt", "Literatur"],
+      "keywords_en": ["background", "related work", "prior", "literature", "survey"],
+      "search_terms": ["background related work prior", "literature survey"],
+      "model": "qwen2.5:3b",
+      "system_prompt": "You are a research assistant for background and related work.\n\nRULES:\n1. Call search_term with 'background related work' (top_k=10).\n2. Summarize all relevant prior work found in the text.\n3. Answer ONLY from tool results."
+    },
+    "general": {
+      "display_name": "Allgemein",
+      "keywords_de": [],
+      "keywords_en": [],
+      "search_terms": [],
+      "model": "qwen2.5:3b",
+      "system_prompt": "You are a document assistant.\n\nRULES:\n1. Call search_term with relevant keywords (top_k=10).\n2. Read all returned sections carefully.\n3. Answer ONLY from tool results. Do not invent anything."
+    }
+  }
+}

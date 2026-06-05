@@ -1,23 +1,47 @@
-"""Quick sanity check on pipeline chunk output."""
+"""Run the pipeline on all PDFs in data/ and write outputs/chunks.json.
+
+Usage:
+    uv run python scripts/check_chunks.py
+"""
+import dataclasses
 import json
+import logging
 import pathlib
 import sys
 
-output_dir = pathlib.Path("output")
-candidates = list(output_dir.glob("**/*.json")) if output_dir.exists() else []
-if not candidates:
-    sys.exit("No JSON files found in output/")
+logging.basicConfig(level=logging.WARNING)
 
-chunk_file = candidates[0]
-chunks = json.loads(chunk_file.read_text(encoding="utf-8"))
+sys.path.insert(0, str(pathlib.Path(".").resolve()))
 
-print(f"File: {chunk_file}")
-print(f"Total chunks: {len(chunks)}")
+from src.pipeline import PDFPipeline, PipelineConfig  # noqa: E402
 
-keywords = ["Laufzeit", "Kuendigung", "K\u00fcndigung", "Schlechtleistung"]
-hits = [c for c in chunks if any(k in c.get("text", "") for k in keywords)]
+data_dir = pathlib.Path("data")
+pdfs = list(data_dir.glob("*.pdf"))
+if not pdfs:
+    sys.exit("No PDFs found in data/")
+
+outputs_dir = pathlib.Path("outputs")
+outputs_dir.mkdir(exist_ok=True)
+
+pipeline = PDFPipeline(config=PipelineConfig())
+
+all_chunks = []
+for pdf in pdfs:
+    print(f"Processing {pdf.name}...")
+    chunks = pipeline.run(pdf)
+    print(f"  -> {len(chunks)} chunks")
+    all_chunks.extend(chunks)
+
+out_file = outputs_dir / "chunks.json"
+out_file.write_text(
+    json.dumps([dataclasses.asdict(c) for c in all_chunks], ensure_ascii=False, indent=2),
+    encoding="utf-8",
+)
+print(f"\nWrote {len(all_chunks)} chunks to {out_file}")
+
+keywords = ["Laufzeit", "K\u00fcndigung", "Schlechtleistung"]
+hits = [c for c in all_chunks if any(k in c.text for k in keywords)]
 print(f"Chunks with key contract terms: {len(hits)}")
 for h in hits:
-    page = h.get("page_number", "?")
-    preview = h.get("text", "")[:120].replace("\n", " ")
-    print(f"  p{page}: {preview}")
+    preview = h.text[:120].replace("\n", " ")
+    print(f"  p{h.page_number}: {preview}")

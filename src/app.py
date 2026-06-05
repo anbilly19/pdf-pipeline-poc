@@ -48,6 +48,8 @@ def _init_session() -> None:
         "indexed_doc": None,
         "overlay_source": None,
         "latest_sources": [],
+        "active_provider": None,
+        "active_model": None,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -73,6 +75,15 @@ def _clear_index(store: FAISSStore) -> None:
     store._texts = []
 
 
+def _rebuild_agent(store: FAISSStore, embedder: ChunkEmbedder, provider: str, model: str) -> None:
+    """Rebuild the agent with the given provider/model and update session state."""
+    retriever = BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K)
+    st.session_state.agent = build_agent(retriever=retriever, provider=provider, model=model)
+    st.session_state.active_provider = provider
+    st.session_state.active_model = model
+    logger.info("Agent rebuilt: provider=%s model=%s", provider, model)
+
+
 def main() -> None:
     st.set_page_config(page_title="PDF Q&A", page_icon="📄", layout="wide")
     _init_session()
@@ -93,6 +104,15 @@ def main() -> None:
         else:
             model = st.selectbox("Model", _OLLAMA_MODELS)
 
+        # Auto-rebuild agent when model/provider changes (no re-index needed)
+        if (
+            st.session_state.indexed_doc
+            and st.session_state.agent is not None
+            and (provider != st.session_state.active_provider or model != st.session_state.active_model)
+        ):
+            _rebuild_agent(store, embedder, provider, model)
+            st.success(f"Switched to {provider}/{model}")
+
         st.divider()
         uploaded = st.file_uploader("Upload a PDF", type="pdf")
 
@@ -108,13 +128,13 @@ def main() -> None:
             st.session_state.messages = []
             st.session_state.overlay_source = None
             st.session_state.latest_sources = []
-            retriever = BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K)
-            st.session_state.agent = build_agent(
-                retriever=retriever, provider=provider, model=model
-            )
+            _rebuild_agent(store, embedder, provider, model)
 
         if st.session_state.indexed_doc:
+            active_model = st.session_state.get("active_model", "?")
+            active_provider = st.session_state.get("active_provider", "?")
             st.info(f"Active doc: **{st.session_state.indexed_doc}**")
+            st.caption(f"Model: {active_provider}/{active_model}")
         st.divider()
         if st.button("Clear conversation"):
             st.session_state.messages = []

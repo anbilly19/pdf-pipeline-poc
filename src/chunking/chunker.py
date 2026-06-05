@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_CHARS = 1000
 _MIN_CHUNK_CHARS = 60
-_MIN_BBOX_AREA = 100.0  # drop bboxes with area < 100 PDF points² (noise / zero-area)
+_MIN_BBOX_AREA = 100.0
 
 _NOISE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"EVB-IT\s+Dienst", re.IGNORECASE),
@@ -36,10 +36,10 @@ class ChunkerConfig:
     overlap_chars: int = 100
     min_chunk_chars: int = _MIN_CHUNK_CHARS
     deduplicate: bool = True
+    heading_lookahead: bool = True  # prepend heading to next chunk body
 
 
 def _valid_bbox(bbox: list[float]) -> bool:
-    """Return True if bbox has 4 coords and a non-trivial area."""
     if len(bbox) != 4:
         return False
     x0, y0, x1, y1 = bbox
@@ -68,12 +68,28 @@ class LayoutChunker:
         buffer_texts: list[str] = []
         buffer_bboxes: list[list[float]] = []
         buffer_confidence: list[float] = []
+        pending_heading: str | None = None  # heading waiting to be prepended
 
-        def flush() -> None:
+        def flush(force_heading: str | None = None) -> None:
+            nonlocal pending_heading
             if not buffer_texts:
+                # If we only have a heading and nothing followed it on this page,
+                # emit it alone so it isn't silently dropped.
+                if pending_heading:
+                    chunks.append(Chunk(
+                        text=pending_heading,
+                        page_number=page.page_number,
+                        bboxes=[b for b in buffer_bboxes if _valid_bbox(b)] or [],
+                        chunk_type="text",
+                        confidence=0.90,
+                        image_path=page.image_path,
+                    ))
+                    pending_heading = None
                 return
-            text = " ".join(buffer_texts)
-            # Only keep bboxes with valid area
+
+            # Prepend the pending heading so the chunk body is searchable by title
+            prefix = (pending_heading + "\n") if pending_heading else ""
+            text = prefix + " ".join(buffer_texts)
             valid_bboxes = [b for b in buffer_bboxes if _valid_bbox(b)]
             chunks.append(Chunk(
                 text=text,
@@ -86,10 +102,12 @@ class LayoutChunker:
             buffer_texts.clear()
             buffer_bboxes.clear()
             buffer_confidence.clear()
+            pending_heading = force_heading  # carry next heading into next chunk
 
         for element in page.elements:
             if _is_noise(element.text):
                 continue
+
             if element.type == "table":
                 flush()
                 bbox = element.bbox
@@ -104,15 +122,22 @@ class LayoutChunker:
                     ))
                 else:
                     logger.warning(
-                        "Dropping table element on page %d — invalid bbox %s",
+                        "Dropping table on page %d — invalid bbox %s",
                         page.page_number, bbox,
                     )
                 continue
-            if self._is_heading(element) and buffer_texts:
-                flush()
+
+            if self._is_heading(element):
+                flush(force_heading=element.text)
+                # Don't add heading to buffer — it'll be prepended on next flush
+                buffer_bboxes.append(element.bbox)  # keep bbox for coverage
+                buffer_confidence.append(element.confidence)
+                continue
+
             current_len = sum(len(t) for t in buffer_texts)
             if current_len + len(element.text) > self._cfg.max_chars and buffer_texts:
                 flush()
+
             buffer_texts.append(element.text)
             buffer_bboxes.append(element.bbox)
             buffer_confidence.append(element.confidence)
@@ -129,7 +154,6 @@ class LayoutChunker:
                 continue
             if _is_noise(stripped):
                 continue
-            # Drop chunks whose bboxes are all invalid (nothing to highlight)
             if not c.bboxes:
                 logger.debug("Dropping chunk with no valid bboxes: %.60s", stripped)
                 continue

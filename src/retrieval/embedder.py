@@ -1,67 +1,141 @@
-"""Chunk embedding using Ollama — fully offline, zero HuggingFace calls.
+"""Chunk embedding — Ollama primary, sentence-transformers fallback.
 
-Default model: nomic-embed-text
-- Runs entirely via local Ollama daemon
-- Pull once: ollama pull nomic-embed-text
+Primary:  nomic-embed-text via local Ollama daemon
+          Pull once: ollama pull nomic-embed-text
+Fallback: sentence-transformers (paraphrase-multilingual-mpnet-base-v2)
+          Fully offline, good German support, no Ollama required.
+
+Zero-vector detection: if Ollama returns a zero/constant vector
+(silent failure mode), the embedder automatically switches to the
+sentence-transformers fallback for that batch/query.
 """
 from __future__ import annotations
 
 import logging
+from typing import TYPE_CHECKING
+
+import numpy as np
 
 from src.models import Chunk
 
+if TYPE_CHECKING:
+    pass
+
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "nomic-embed-text"
+_DEFAULT_OLLAMA_MODEL = "nomic-embed-text"
+_FALLBACK_ST_MODEL = "paraphrase-multilingual-mpnet-base-v2"
+_ZERO_THRESHOLD = 1e-6  # vectors with norm below this are considered broken
 
 
 class ChunkEmbedder:
-    """Embeds Chunk objects into dense vectors via Ollama.
+    """Embeds Chunk objects into dense vectors.
+
+    Tries Ollama first; falls back to sentence-transformers if Ollama
+    is unavailable or returns zero/constant vectors.
 
     Args:
         model: Ollama embedding model identifier.
         base_url: Ollama API base URL.
+        fallback_model: sentence-transformers model name for fallback.
     """
 
     def __init__(
         self,
-        model: str = _DEFAULT_MODEL,
+        model: str = _DEFAULT_OLLAMA_MODEL,
         base_url: str = "http://localhost:11434",
+        fallback_model: str = _FALLBACK_ST_MODEL,
     ) -> None:
         self._model = model
         self._base_url = base_url
+        self._fallback_model = fallback_model
+        self._use_fallback = False  # latched to True once Ollama is detected broken
+        self._st_model = None  # lazy-loaded
 
-    def _client(self) -> object:
-        from langchain_ollama import OllamaEmbeddings  # noqa: PLC0415
-        return OllamaEmbeddings(model=self._model, base_url=self._base_url)
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def embed_chunks(self, chunks: list[Chunk]) -> list[list[float]]:
-        """Embed a list of chunks into dense vectors.
-
-        Args:
-            chunks: Chunks to embed.
-
-        Returns:
-            List of embedding vectors, same order as input chunks.
-        """
+        """Embed a list of chunks into dense vectors."""
         if not chunks:
             return []
-
         texts = [c.text for c in chunks]
-        client = self._client()
-        vectors = client.embed_documents(texts)  # type: ignore[union-attr]
-        logger.debug("Embedded %d chunks via Ollama (%s)", len(chunks), self._model)
+        vectors = self._embed_texts(texts)
+        logger.info(
+            "Embedded %d chunks via %s",
+            len(chunks),
+            "sentence-transformers" if self._use_fallback else f"Ollama/{self._model}",
+        )
         return vectors
 
     def embed_query(self, query: str) -> list[float]:
-        """Embed a single query string.
+        """Embed a single query string."""
+        vectors = self._embed_texts([query])
+        return vectors[0]
 
-        Args:
-            query: Natural language query.
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
 
-        Returns:
-            Embedding vector.
-        """
-        client = self._client()
-        vector = client.embed_query(query)  # type: ignore[union-attr]
-        return vector
+    def _embed_texts(self, texts: list[str]) -> list[list[float]]:
+        """Embed texts, falling back to sentence-transformers on Ollama failure."""
+        if not self._use_fallback:
+            try:
+                vectors = self._ollama_embed(texts)
+                if self._is_broken(vectors):
+                    logger.warning(
+                        "Ollama/%s returned zero/constant vectors — switching to "
+                        "sentence-transformers fallback permanently for this session.",
+                        self._model,
+                    )
+                    self._use_fallback = True
+                else:
+                    return vectors
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "Ollama embedding failed (%s) — switching to sentence-transformers fallback.",
+                    exc,
+                )
+                self._use_fallback = True
+
+        return self._st_embed(texts)
+
+    def _ollama_embed(self, texts: list[str]) -> list[list[float]]:
+        from langchain_ollama import OllamaEmbeddings  # noqa: PLC0415
+        client = OllamaEmbeddings(model=self._model, base_url=self._base_url)
+        return client.embed_documents(texts)  # type: ignore[return-value]
+
+    def _st_embed(self, texts: list[str]) -> list[list[float]]:
+        """Embed using sentence-transformers (offline, multilingual)."""
+        if self._st_model is None:
+            try:
+                from sentence_transformers import SentenceTransformer  # noqa: PLC0415
+            except ImportError as exc:
+                raise RuntimeError(
+                    "sentence-transformers is not installed. "
+                    "Run: pip install sentence-transformers\n"
+                    "Also ensure Ollama is running: ollama serve"
+                ) from exc
+            logger.info("Loading sentence-transformers model: %s", self._fallback_model)
+            self._st_model = SentenceTransformer(self._fallback_model)
+            logger.info("sentence-transformers model loaded.")
+        vecs = self._st_model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        return vecs.tolist()
+
+    @staticmethod
+    def _is_broken(vectors: list[list[float]]) -> bool:
+        """Return True if vectors are zero or all identical (Ollama silent failure)."""
+        if not vectors:
+            return True
+        arr = np.array(vectors, dtype=np.float32)
+        # Check for zero vectors
+        norms = np.linalg.norm(arr, axis=1)
+        if np.all(norms < _ZERO_THRESHOLD):
+            return True
+        # Check if all vectors are identical (constant output)
+        if len(arr) > 1:
+            diffs = np.max(np.abs(arr - arr[0]))
+            if diffs < _ZERO_THRESHOLD:
+                return True
+        return False

@@ -5,14 +5,13 @@ Requires: opendataloader-pdf>=1.12.0 and Java 11+.
 
 ODL JSON structure
 ------------------
-Top-level `kids` contains page elements. Each element may have nested
-`kids` of its own (list items, table rows/cells). Content is stored in
-`content` for paragraphs/headings, and recursively in nested `kids` for
-list and table elements. This extractor flattens all nested content.
+Top-level `kids` contains page elements. Lists use a dedicated `list items`
+key (not `kids`) where each item has a `content` field. Tables use `rows`
+or `kids` with row/cell nesting.
 
 Element type mapping:
     paragraph / heading  ->  type="text"
-    list                 ->  type="text"  (flattened bullet text)
+    list                 ->  type="text"  (flattened from list items)
     table                ->  type="table" (markdown-rendered)
 
 Page number normalisation
@@ -106,11 +105,7 @@ class OpenDataLoaderExtractor(BaseExtractor):
         return pages
 
     def _map_element(self, kid: dict) -> list[Element]:
-        """Map a single ODL element to one or more Element objects.
-
-        Recursively extracts nested list items and table content.
-        Returns a list (usually one item, but lists expand to multiple).
-        """
+        """Map a single ODL element to one or more Element objects."""
         odl_type: str = kid.get("type", "paragraph").lower()
         bbox: list[float] = kid.get("bounding box", [])
         confidence: float = _CONFIDENCE.get(odl_type, _CONFIDENCE_DEFAULT)
@@ -126,7 +121,6 @@ class OpenDataLoaderExtractor(BaseExtractor):
             return []
 
         if odl_type == "list":
-            # Flatten nested list kids into a single text block
             text = _flatten_list(kid)
             if len(text.strip()) >= _MIN_TEXT_LEN:
                 return [Element(type="text", text=text, bbox=bbox, confidence=confidence)]
@@ -144,31 +138,33 @@ class OpenDataLoaderExtractor(BaseExtractor):
 # ---------------------------------------------------------------------------
 
 def _flatten_list(node: dict, depth: int = 0) -> str:
-    """Recursively extract text from a list element and its nested kids.
+    """Extract text from an ODL list element.
 
-    ODL list structure:
-        {type: list, kids: [
-            {type: list-item, content: "text", kids: [...]},
+    ODL stores list content in 'list items' (not 'kids'):
+        {
+          type: list,
+          list items: [
+            {type: list-item, content: "text", kids: [...], list items: [...]},
             ...
-        ]}
+          ]
+        }
+    Falls back to 'kids' and direct 'content' for robustness.
     """
     lines: list[str] = []
 
-    # Direct content on this node
+    # Direct content on this node (uncommon for lists, but handle it)
     content = node.get("content", "").strip()
     if content:
         lines.append(content)
 
-    # Recurse into kids
-    for child in node.get("kids", []):
-        child_type = child.get("type", "").lower()
+    # ODL actual key: 'list items'
+    children = node.get("list items") or node.get("kids") or []
+    for child in children:
         child_content = child.get("content", "").strip()
-
         if child_content:
             lines.append(child_content)
-
-        # Recurse further if the child has its own kids
-        if child.get("kids"):
+        # Recurse: child may itself have nested list items
+        if child.get("list items") or child.get("kids"):
             nested = _flatten_list(child, depth + 1)
             if nested:
                 lines.append(nested)
@@ -181,15 +177,11 @@ def _flatten_list(node: dict, depth: int = 0) -> str:
 # ---------------------------------------------------------------------------
 
 def _render_table_markdown(table: dict) -> str:
-    """Render an ODL table element as a pipe-delimited markdown table.
-
-    Handles both flat rows list and nested kids structure.
-    """
+    """Render an ODL table element as a pipe-delimited markdown table."""
     rows: list[dict] = table.get("rows", []) or [
         k for k in table.get("kids", []) if k.get("type", "").lower() == "row"
     ]
     if not rows:
-        # Try flattening as list as last resort
         text = _flatten_list(table)
         return text if len(text.strip()) >= _MIN_TEXT_LEN else ""
 
@@ -214,7 +206,7 @@ def _render_table_markdown(table: dict) -> str:
 
 def _cell_text(cell: dict) -> str:
     text = cell.get("content", cell.get("text", "")).strip()
-    if not text and cell.get("kids"):
+    if not text and (cell.get("list items") or cell.get("kids")):
         text = _flatten_list(cell)
     return text if text else " "
 

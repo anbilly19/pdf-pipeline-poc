@@ -1,11 +1,4 @@
-"""Agent tools for the PDF Q&A pipeline.
-
-All tools follow the contract from CLAUDE.md:
-    return (result, source_bboxes, page_number, image_path)
-
-Each tool is a LangChain @tool that returns a ToolResult dataclass
-so the agent can render highlights in the frontend.
-"""
+"""Agent tools for the PDF Q&A pipeline."""
 from __future__ import annotations
 
 import csv
@@ -21,26 +14,17 @@ from src.retrieval.retriever import BBoxRetriever
 
 logger = logging.getLogger(__name__)
 
+_TOP_K = 10  # hardcoded, model cannot override
+
 
 @dataclass
 class ToolResult:
-    """Standardised tool output carrying result + source location.
-
-    Args:
-        content: The tool's primary output (text, CSV string, etc.).
-        bboxes: Bounding boxes of the source region on the page.
-        page_number: 1-based source page.
-        image_path: Path to rendered page PNG for overlay.
-    """
-
     content: str
     bboxes: list[list[float]]
     page_number: int
     image_path: str
 
     def __str__(self) -> str:
-        # Include ALL bboxes and the full image_path so app.py can parse them
-        # without having to reconstruct paths independently.
         return (
             f"{self.content}\n"
             f"[source: page {self.page_number}, "
@@ -49,65 +33,54 @@ class ToolResult:
         )
 
 
-NO_RESULTS = "No relevant passages found."
+NO_RESULTS = "Keine relevanten Abschnitte gefunden."
 NO_TABLE = "No table found."
 NO_SECTION = "Section not found."
 NO_REGION = "No region found on page."
 
 
 def build_tools(retriever: BBoxRetriever) -> list[object]:
-    """Build all agent tools bound to a retriever instance.
-
-    Args:
-        retriever: Initialised BBoxRetriever connected to the vector store.
-
-    Returns:
-        List of LangChain tool objects ready to bind to an LLM.
-    """
 
     @tool
     def search_term(
-        query: Annotated[str, "Natural language search query in German or English"],
-        top_k: Annotated[int, "Number of results to return (default 10)"] = 10,
+        query: Annotated[str, "Suchanfrage auf Deutsch"],
     ) -> str:
-        """Search the document for text relevant to a query.
+        """Durchsucht das Dokument nach relevanten Textabschnitten.
 
-        Returns the most relevant passages with their page locations
-        and bounding boxes for highlight rendering.
+        Gibt die 10 relevantesten Abschnitte zurück.
+        WICHTIG: Lies ALLE Abschnitte (1-10) vollständig durch.
+        Der gesuchte Inhalt kann in Abschnitt 3, 5 oder 8 stehen — nicht nur in Abschnitt 1.
+        Benutze den Text aus diesen Abschnitten für deine Antwort.
         """
-        chunks = retriever.retrieve(query, top_k=top_k)
+        chunks = retriever.retrieve(query, top_k=_TOP_K)
         if not chunks:
             return NO_RESULTS
 
-        results = [str(ToolResult(
-            content=c.text,
-            bboxes=c.bboxes,
-            page_number=c.page_number,
-            image_path=c.image_path,
-        )) for c in chunks]
-        return "\n\n---\n\n".join(results)
+        parts = ["GEFUNDENE ABSCHNITTE (lies alle durch):\n"]
+        for i, c in enumerate(chunks, 1):
+            result = ToolResult(
+                content=c.text,
+                bboxes=c.bboxes,
+                page_number=c.page_number,
+                image_path=c.image_path,
+            )
+            parts.append(f"--- Abschnitt {i} ---\n{result}")
+        return "\n\n".join(parts)
 
     @tool
     def extract_table_to_csv(
         query: Annotated[str, "Description of the table to find and extract"],
     ) -> str:
-        """Find a table in the document and return it as CSV.
-
-        Searches for table chunks matching the query, then formats
-        the best match as CSV. Returns the CSV string and source location.
-        """
+        """Find a table in the document and return it as CSV."""
         chunks = retriever.retrieve(query, top_k=5, filter_chunk_type="table")
         if not chunks:
             chunks = retriever.retrieve(query, top_k=3)
-
         if not chunks:
             return NO_TABLE
 
         best: Chunk = chunks[0]
-        csv_str = _markdown_table_to_csv(best.text)
-
         result = ToolResult(
-            content=csv_str,
+            content=_markdown_table_to_csv(best.text),
             bboxes=best.bboxes,
             page_number=best.page_number,
             image_path=best.image_path,
@@ -118,11 +91,7 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
     def summarize_section(
         title: Annotated[str, "Title or topic of the section to summarise"],
     ) -> str:
-        """Retrieve and summarise a named section from the document.
-
-        Returns the raw text of the section with its page location.
-        The LLM calling this tool should summarise the returned text.
-        """
+        """Retrieve and summarise a named section from the document."""
         chunks = retriever.retrieve(title, top_k=4)
         if not chunks:
             return NO_SECTION
@@ -142,17 +111,9 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
         page_number: Annotated[int, "Page number (1-based)"],
         query: Annotated[str, "Query to find the specific region to highlight"],
     ) -> str:
-        """Return the bounding boxes for a region on a specific page.
-
-        Use this when the user asks to highlight or point to a specific
-        part of the document. Returns bbox coordinates and the page image path.
-        """
+        """Return the bounding boxes for a region on a specific page."""
         chunks = retriever.retrieve(query, top_k=10)
-        page_chunks = [c for c in chunks if c.page_number == page_number]
-
-        if not page_chunks:
-            page_chunks = chunks[:3]
-
+        page_chunks = [c for c in chunks if c.page_number == page_number] or chunks[:3]
         if not page_chunks:
             return NO_REGION
 
@@ -169,23 +130,11 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
 
 
 def _markdown_table_to_csv(text: str) -> str:
-    """Convert a markdown table string to CSV format.
-
-    Falls back to returning the original text if it is not a valid
-    markdown table.
-
-    Args:
-        text: Markdown table string (pipe-delimited rows).
-
-    Returns:
-        CSV string, or original text if conversion fails.
-    """
     lines = [line.strip() for line in text.strip().splitlines()]
     table_lines = [
         line for line in lines
         if line.startswith("|") and set(line.replace("|", "").replace("-", "").replace(" ", "")) != set()
     ]
-
     if not table_lines:
         return text
 
@@ -194,5 +143,4 @@ def _markdown_table_to_csv(text: str) -> str:
     for line in table_lines:
         cells = [c.strip() for c in line.strip("|").split("|")]
         writer.writerow(cells)
-
     return output.getvalue()

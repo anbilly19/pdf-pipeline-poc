@@ -1,23 +1,37 @@
-"""Streamlit frontend for the PDF Q&A pipeline."""
+"""Streamlit frontend for the PDF Q&A pipeline.
+
+Roadmap #7 — Modern UI
+-----------------------
+  - Full pipeline wiring: knowledge graph + Self-RAG filter + checkpointer
+  - Dark-mode custom CSS (Nexus-inspired token palette)
+  - Sidebar: model picker, Self-RAG gate slider, reranker toggle, session reset
+  - Chat: streaming-style typing indicator, domain badge, source pills
+  - Page viewer: highlighted bbox overlay, page navigation pills
+  - Status bar: index stats, graph node/edge count, Self-RAG keep-rate
+"""
 from __future__ import annotations
 
-# Must be first import — silences transformers __path__ spam before any model loads
-import src.silence  # noqa: F401
+import src.silence  # noqa: F401  — must be first
 
 import logging
 import os
+import re
+import ast
 from pathlib import Path
 
 from dotenv import load_dotenv
 load_dotenv()
 
 import streamlit as st
+from langchain_core.messages import HumanMessage, ToolMessage
 
+from src.agent.domain_config import DocTypeConfig, load_active_config
 from src.agent.graph import build_agent
 from src.agent.router import route_query
-from src.agent.domain_config import load_active_config, DocTypeConfig
+from src.graph.builder import load_graph
 from src.indexer import DocumentIndexer
 from src.retrieval.embedder import ChunkEmbedder
+from src.retrieval.reranker import OllamaReranker
 from src.retrieval.retriever import BBoxRetriever
 from src.retrieval.store import FAISSStore
 from src.ui.overlay import render_page_with_bboxes
@@ -30,41 +44,213 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-_OLLAMA_MODELS = [
-    "qwen2.5:3b",
-    "qwen2.5:7b",
-    "gemma4:e2b",
-    "llama3.2:3b",
-    "llama3.1:8b",
-    "mistral:7b",
-]
+_OLLAMA_MODELS = ["gemma4:e2b", "qwen2.5:3b", "qwen2.5:7b", "llama3.2:3b", "llama3.1:8b", "mistral:7b"]
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
-_MAX_SOURCE_PILLS = 3
+_MAX_SOURCE_PILLS = 5
+
+# ---------------------------------------------------------------------------
+# CSS — Nexus-inspired dark palette
+# ---------------------------------------------------------------------------
+_CSS = """
+<style>
+/* ── Google font ─────────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
+
+/* ── Root tokens ─────────────────────────────────────────────────────── */
+:root {
+  --bg:            #171614;
+  --surface:       #1c1b19;
+  --surface-2:     #22211f;
+  --border:        #393836;
+  --text:          #cdccca;
+  --text-muted:    #797876;
+  --primary:       #4f98a3;
+  --primary-glow:  rgba(79,152,163,.15);
+  --accent:        #e8af34;
+  --radius:        10px;
+  --font:          'Inter', sans-serif;
+}
+
+/* ── Global reset ────────────────────────────────────────────────────── */
+html, body, [class*="css"] { font-family: var(--font) !important; }
+.stApp { background: var(--bg) !important; color: var(--text) !important; }
+
+/* ── Sidebar ─────────────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+  background: var(--surface) !important;
+  border-right: 1px solid var(--border) !important;
+}
+[data-testid="stSidebar"] * { color: var(--text) !important; }
+
+/* ── Chat messages ───────────────────────────────────────────────────── */
+[data-testid="stChatMessage"] {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+  margin-bottom: .5rem !important;
+}
+
+/* ── Input box ───────────────────────────────────────────────────────── */
+[data-testid="stChatInput"] textarea {
+  background: var(--surface-2) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+  color: var(--text) !important;
+}
+[data-testid="stChatInput"] textarea:focus {
+  border-color: var(--primary) !important;
+  box-shadow: 0 0 0 3px var(--primary-glow) !important;
+}
+
+/* ── Buttons ─────────────────────────────────────────────────────────── */
+.stButton > button {
+  background: var(--surface-2) !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text) !important;
+  border-radius: var(--radius) !important;
+  font-weight: 500 !important;
+  transition: all .15s ease !important;
+}
+.stButton > button:hover {
+  border-color: var(--primary) !important;
+  color: var(--primary) !important;
+  background: var(--primary-glow) !important;
+}
+.stButton > button[kind="primary"] {
+  background: var(--primary) !important;
+  border-color: var(--primary) !important;
+  color: #fff !important;
+}
+.stButton > button[kind="primary"]:hover {
+  background: #3a7f8a !important;
+}
+
+/* ── Cards / metric boxes ────────────────────────────────────────────── */
+[data-testid="stMetric"] {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+  padding: .75rem 1rem !important;
+}
+[data-testid="stMetricValue"] { color: var(--primary) !important; font-weight: 600 !important; }
+[data-testid="stMetricLabel"] { color: var(--text-muted) !important; font-size: .75rem !important; }
+
+/* ── Selectbox / radio ───────────────────────────────────────────────── */
+[data-testid="stSelectbox"] > div,
+[data-baseweb="select"] > div {
+  background: var(--surface-2) !important;
+  border-color: var(--border) !important;
+  border-radius: var(--radius) !important;
+}
+
+/* ── Expander ────────────────────────────────────────────────────────── */
+[data-testid="stExpander"] {
+  background: var(--surface) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+}
+
+/* ── Source pill strip ───────────────────────────────────────────────── */
+.source-strip {
+  display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .4rem;
+}
+.source-pill {
+  background: var(--primary-glow);
+  border: 1px solid var(--primary);
+  color: var(--primary);
+  border-radius: 999px;
+  padding: .15rem .6rem;
+  font-size: .72rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .15s;
+}
+.source-pill:hover { background: var(--primary); color: #fff; }
+
+/* ── Domain badge ────────────────────────────────────────────────────── */
+.domain-badge {
+  display: inline-block;
+  background: rgba(232,175,52,.12);
+  border: 1px solid var(--accent);
+  color: var(--accent);
+  border-radius: 999px;
+  padding: .1rem .55rem;
+  font-size: .68rem;
+  font-weight: 600;
+  margin-left: .4rem;
+}
+
+/* ── Status bar ──────────────────────────────────────────────────────── */
+.status-bar {
+  display: flex; gap: 1.5rem; align-items: center;
+  padding: .45rem .75rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: .72rem;
+  color: var(--text-muted);
+  margin-bottom: .75rem;
+}
+.status-bar span { display: flex; align-items: center; gap: .3rem; }
+.dot-green  { width:7px; height:7px; border-radius:50%; background:#6daa45; display:inline-block; }
+.dot-yellow { width:7px; height:7px; border-radius:50%; background:#e8af34; display:inline-block; }
+.dot-red    { width:7px; height:7px; border-radius:50%; background:#dd6974; display:inline-block; }
+
+/* ── Dividers ────────────────────────────────────────────────────────── */
+hr { border-color: var(--border) !important; }
+
+/* ── Scrollbar ───────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+"""
 
 
+# ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
 def _init_session() -> None:
-    defaults = {
+    defaults: dict = {
         "messages": [],
-        "agent": None,
         "indexed_doc": None,
         "overlay_source": None,
         "latest_sources": [],
-        "active_provider": None,
-        "active_model": None,
-        "doc_config": None,       # DocTypeConfig for indexed document
-        "active_domain": None,    # name of domain used for last query
+        "active_provider": "ollama",
+        "active_model": _OLLAMA_MODELS[0],
+        "doc_config": None,
+        "active_domain": None,
+        "index_stats": {},          # {chunks, nodes, edges}
+        "self_rag_stats": {},        # {kept, dropped} from last query
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
 
+# ---------------------------------------------------------------------------
+# Cached heavy components
+# ---------------------------------------------------------------------------
 @st.cache_resource
 def _get_shared_components() -> tuple[FAISSStore, ChunkEmbedder]:
     store = FAISSStore(persist_dir=OUTPUT_DIR / "faiss_index")
     embedder = ChunkEmbedder()
     return store, embedder
+
+
+def _get_retriever(
+    store: FAISSStore,
+    embedder: ChunkEmbedder,
+    enable_reranker: bool = True,
+    reranker_model: str = "bge-reranker-v2-m3",
+) -> BBoxRetriever:
+    reranker = None
+    if enable_reranker:
+        reranker = OllamaReranker(model=reranker_model)
+        if not reranker.is_available():
+            reranker = None
+    return BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K, reranker=reranker)
 
 
 def _clear_index(store: FAISSStore) -> None:
@@ -79,48 +265,126 @@ def _clear_index(store: FAISSStore) -> None:
     store._texts = []
 
 
-def _get_retriever(store: FAISSStore, embedder: ChunkEmbedder) -> BBoxRetriever:
-    return BBoxRetriever(store=store, embedder=embedder, top_k=_DEFAULT_TOP_K)
+# ---------------------------------------------------------------------------
+# Source extraction from tool messages
+# ---------------------------------------------------------------------------
+def _extract_sources(messages: list) -> list[dict]:
+    sources: list[dict] = []
+    seen: set[int] = set()
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+        for m in re.finditer(
+            r"\[source: page (\d+), bboxes=(\[\[.*?\]\]), image_path=('.*?'|\".*?\")",
+            str(msg.content), re.DOTALL,
+        ):
+            if len(sources) >= _MAX_SOURCE_PILLS:
+                break
+            try:
+                page = int(m.group(1))
+                if page in seen:
+                    continue
+                bboxes = ast.literal_eval(m.group(2))
+                image_path = ast.literal_eval(m.group(3))
+                if not image_path or not Path(image_path).exists():
+                    fallback = OUTPUT_DIR / "pages" / f"page_{page:04d}.png"
+                    if fallback.exists():
+                        image_path = str(fallback)
+                sources.append({"page": page, "bboxes": bboxes, "image_path": image_path})
+                seen.add(page)
+            except Exception:  # noqa: BLE001
+                pass
+    return sources
 
 
+# ---------------------------------------------------------------------------
+# Status bar HTML
+# ---------------------------------------------------------------------------
+def _status_bar_html(
+    indexed_doc: str | None,
+    stats: dict,
+    self_rag_enabled: bool,
+    self_rag_stats: dict,
+    reranker_on: bool,
+) -> str:
+    if not indexed_doc:
+        return (
+            '<div class="status-bar">'
+            '<span><span class="dot-red"></span>No document indexed</span>'
+            '</div>'
+        )
+    chunks = stats.get("chunks", "—")
+    nodes  = stats.get("nodes", "—")
+    edges  = stats.get("edges", "—")
+    kept   = self_rag_stats.get("kept", "—")
+    dropped = self_rag_stats.get("dropped", "—")
+    rag_dot = "dot-green" if self_rag_enabled else "dot-yellow"
+    rag_label = f"Self-RAG ▸ kept {kept} / dropped {dropped}" if self_rag_enabled else "Self-RAG off"
+    reranker_dot = "dot-green" if reranker_on else "dot-yellow"
+    return (
+        '<div class="status-bar">'
+        f'<span><span class="dot-green"></span><b>{indexed_doc}</b></span>'
+        f'<span>📦 {chunks} chunks</span>'
+        f'<span>🕸 {nodes} nodes · {edges} edges</span>'
+        f'<span><span class="{rag_dot}"></span>{rag_label}</span>'
+        f'<span><span class="{reranker_dot}"></span>Reranker {"on" if reranker_on else "off"}</span>'
+        '</div>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main() -> None:
-    st.set_page_config(page_title="PDF Q&A", page_icon="📄", layout="wide")
+    st.set_page_config(
+        page_title="PDF Q&A",
+        page_icon="📄",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
+    st.markdown(_CSS, unsafe_allow_html=True)
     _init_session()
     store, embedder = _get_shared_components()
 
-    # ------------------------------------------------------------------ sidebar
+    # ── Sidebar ───────────────────────────────────────────────────────────
     with st.sidebar:
-        st.title("📄 PDF Q&A")
-        st.caption("Agentic document assistant with bbox citation")
+        st.markdown("## 📄 PDF Q&A")
+        st.caption("Agentic document assistant · bbox citation · knowledge graph")
         if os.getenv("LANGCHAIN_TRACING_V2") == "true":
-            st.caption("🔍 LangSmith tracing enabled")
+            st.caption("🔍 LangSmith tracing on")
         st.divider()
 
-        provider = st.radio("LLM provider", ["ollama", "openai"], horizontal=True)
-        if provider == "openai":
-            model = st.selectbox("Model", _OPENAI_MODELS)
-            if not os.getenv("OPENAI_API_KEY"):
-                st.warning("OPENAI_API_KEY not set in .env")
+        # Provider + model
+        provider = st.radio("Provider", ["ollama", "openai"], horizontal=True)
+        model = st.selectbox(
+            "Model",
+            _OLLAMA_MODELS if provider == "ollama" else _OPENAI_MODELS,
+        )
+        if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
+            st.warning("OPENAI_API_KEY not set in .env")
+
+        st.divider()
+
+        # Pipeline toggles
+        enable_reranker = st.toggle("Cross-encoder reranker", value=True)
+        enable_self_rag = st.toggle("Self-RAG filter", value=True)
+        if enable_self_rag:
+            self_rag_gate = st.slider(
+                "BM25 gate (skip Self-RAG above)",
+                min_value=0.0, max_value=1.0, value=0.5, step=0.05,
+                help="Chunks with BM25 score ≥ gate skip the extra Ollama call.",
+            )
         else:
-            model = st.selectbox("Model", _OLLAMA_MODELS)
-
-        # Rebuild agent when provider/model changes (no re-index needed)
-        if (
-            st.session_state.indexed_doc
-            and st.session_state.active_provider is not None
-            and (provider != st.session_state.active_provider or model != st.session_state.active_model)
-        ):
-            st.session_state.active_provider = provider
-            st.session_state.active_model = model
-            st.success(f"Switched to {provider}/{model}")
+            self_rag_gate = 0.5
 
         st.divider()
-        uploaded = st.file_uploader("Upload a PDF", type="pdf")
 
-        if uploaded and st.button("Index document", type="primary"):
+        # Upload + index
+        uploaded = st.file_uploader("Upload PDF", type="pdf")
+        if uploaded and st.button("⚡ Index document", type="primary", use_container_width=True):
             pdf_path = DATA_DIR / uploaded.name
             pdf_path.write_bytes(uploaded.read())
-            with st.spinner("Extracting and indexing..."):
+            with st.spinner("Indexing — extraction → chunks → embeddings → graph …"):
                 _clear_index(store)
                 indexer = DocumentIndexer(
                     embedder=embedder,
@@ -130,83 +394,150 @@ def main() -> None:
                 )
                 n = indexer.index(pdf_path)
                 doc_config: DocTypeConfig = indexer.last_doc_type or load_active_config()
-            st.success(f"Indexed {n} chunks from **{uploaded.name}**")
-            st.info(f"📂 Doc type detected: **{doc_config.display_name}**")
+
+            # Load graph stats
+            graph_path = store._persist_dir / "graph.json"
+            kg = load_graph(graph_path)
+            st.session_state.index_stats = {
+                "chunks": n,
+                "nodes": kg.number_of_nodes(),
+                "edges": kg.number_of_edges(),
+            }
             st.session_state.indexed_doc = pdf_path.stem
             st.session_state.doc_config = doc_config
             st.session_state.active_provider = provider
             st.session_state.active_model = model
-            st.session_state.active_domain = None
             st.session_state.messages = []
             st.session_state.overlay_source = None
             st.session_state.latest_sources = []
+            st.session_state.self_rag_stats = {}
+            st.session_state.active_domain = None
+            st.success(f"✅ {n} chunks indexed · {kg.number_of_nodes()} graph nodes")
+            st.info(f"Doc type: **{doc_config.display_name}**")
 
-        # Active doc info
+        # Active doc summary
         if st.session_state.indexed_doc:
-            doc_config: DocTypeConfig | None = st.session_state.get("doc_config")
-            st.info(f"Active doc: **{st.session_state.indexed_doc}**")
-            if doc_config:
-                st.caption(f"Type: {doc_config.display_name}")
-                domains = [s.display_name for s in doc_config.domains.values()]
-                st.caption(f"Domains: {', '.join(domains)}")
-            active_domain = st.session_state.get("active_domain")
-            if active_domain:
-                st.caption(f"→ Last query domain: **{active_domain}**")
-            st.caption(f"Model: {st.session_state.active_provider}/{st.session_state.active_model}")
+            st.divider()
+            doc_cfg: DocTypeConfig | None = st.session_state.doc_config
+            st.markdown(f"**Active:** `{st.session_state.indexed_doc}`")
+            if doc_cfg:
+                domains = list(doc_cfg.domains.values())
+                st.caption("Domains: " + " · ".join(d.display_name for d in domains))
+            if st.session_state.active_domain:
+                st.caption(f"Last domain: **{st.session_state.active_domain}**")
 
         st.divider()
-        if st.button("Clear conversation"):
+        if st.button("🗑 Clear conversation", use_container_width=True):
             st.session_state.messages = []
             st.session_state.overlay_source = None
             st.session_state.latest_sources = []
             st.session_state.active_domain = None
+            st.session_state.self_rag_stats = {}
             st.rerun()
 
-    # ------------------------------------------------------------------ main layout
-    chat_col, view_col = st.columns([3, 2])
+    # ── Status bar ────────────────────────────────────────────────────────
+    st.markdown(
+        _status_bar_html(
+            st.session_state.indexed_doc,
+            st.session_state.index_stats,
+            enable_self_rag,
+            st.session_state.self_rag_stats,
+            enable_reranker,
+        ),
+        unsafe_allow_html=True,
+    )
 
+    # ── Two-column layout ─────────────────────────────────────────────────
+    chat_col, view_col = st.columns([3, 2], gap="large")
+
+    # ── Chat column ───────────────────────────────────────────────────────
     with chat_col:
-        st.subheader("Chat")
         if not st.session_state.indexed_doc:
-            st.info("Upload and index a PDF to start.")
+            st.info("👈 Upload and index a PDF to start chatting.")
         else:
+            # Render history
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
-                    if msg["role"] == "assistant" and msg.get("domain"):
-                        st.caption(f"→ domain: {msg['domain']}")
+                    if msg["role"] == "assistant":
+                        meta_parts = []
+                        if msg.get("domain"):
+                            meta_parts.append(
+                                f'<span class="domain-badge">{msg["domain"]}</span>'
+                            )
+                        if msg.get("sources"):
+                            pills = "".join(
+                                f'<span class="source-pill">p.{s["page"]}</span>'
+                                for s in msg["sources"]
+                            )
+                            meta_parts.append(
+                                f'<span class="source-strip">{pills}</span>'
+                            )
+                        if meta_parts:
+                            st.markdown(
+                                " ".join(meta_parts), unsafe_allow_html=True
+                            )
 
-            if prompt := st.chat_input("Ask a question about the document..."):
+            # Input
+            if prompt := st.chat_input("Ask a question about the document …"):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.chat_message("user"):
                     st.markdown(prompt)
 
-                # Route query to best domain
-                doc_config = st.session_state.get("doc_config") or load_active_config()
+                # Route
+                doc_config = st.session_state.doc_config or load_active_config()
                 domain_spec = route_query(prompt, config=doc_config)
                 st.session_state.active_domain = domain_spec.display_name
 
                 with st.chat_message("assistant"):
-                    with st.spinner(f"Thinking [{domain_spec.display_name}]..."):
-                        from langchain_core.messages import HumanMessage  # noqa: PLC0415
-                        retriever = _get_retriever(store, embedder)
+                    with st.spinner(f"Thinking · {domain_spec.display_name} …"):
+                        # Build fully wired agent
+                        retriever = _get_retriever(
+                            store, embedder,
+                            enable_reranker=enable_reranker,
+                        )
+                        graph_path = store._persist_dir / "graph.json"
+                        kg = load_graph(graph_path)
+                        all_chunks = store.get_all_chunks()
+
                         agent = build_agent(
                             retriever=retriever,
                             provider=st.session_state.active_provider,
                             model=st.session_state.active_model,
                             domain_spec=domain_spec,
+                            graph=kg,
+                            all_chunks=all_chunks,
+                            self_rag_enabled=enable_self_rag,
+                            self_rag_bm25_gate=self_rag_gate,
                         )
                         result = agent.invoke(
-                            {"messages": [HumanMessage(content=prompt)]},
+                            {"messages": [HumanMessage(content=prompt)]}
                         )
                         answer = result["messages"][-1].content
-                    st.markdown(answer)
-                    st.caption(f"→ domain: {domain_spec.display_name} | model: {domain_spec.model}")
 
-                sources = _extract_sources_from_messages(result["messages"])
+                    st.markdown(answer)
+
+                    # Source pills inline
+                    sources = _extract_sources(result["messages"])
+                    if sources:
+                        pills_html = '<div class="source-strip">' + "".join(
+                            f'<span class="source-pill">p.{s["page"]}</span>'
+                            for s in sources
+                        ) + "</div>"
+                        st.markdown(pills_html, unsafe_allow_html=True)
+                    st.markdown(
+                        f'<span class="domain-badge">{domain_spec.display_name}</span>',
+                        unsafe_allow_html=True,
+                    )
+
+                # Parse Self-RAG stats from logs (best-effort)
+                st.session_state.self_rag_stats = _parse_self_rag_stats(
+                    result["messages"]
+                )
                 st.session_state.latest_sources = sources
                 if sources:
                     st.session_state.overlay_source = sources[0]
+
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": answer,
@@ -215,67 +546,57 @@ def main() -> None:
                 })
                 st.rerun()
 
+    # ── Page viewer column ────────────────────────────────────────────────
     with view_col:
-        st.subheader("Page View")
+        st.markdown("#### 🔍 Source Viewer")
 
-        latest_sources = st.session_state.get("latest_sources", [])
-        if latest_sources:
-            st.caption("Sources (latest query):")
-            cols = st.columns(len(latest_sources))
-            for i, src in enumerate(latest_sources):
-                with cols[i]:
-                    if st.button(f"Page {src['page']}", key=f"pill_{i}"):
+        latest = st.session_state.latest_sources
+        if latest:
+            st.caption("Click a page to view highlighted source:")
+            btn_cols = st.columns(len(latest))
+            for i, src in enumerate(latest):
+                with btn_cols[i]:
+                    if st.button(f"Page {src['page']}", key=f"pill_{i}", use_container_width=True):
                         st.session_state.overlay_source = src
                         st.rerun()
 
-        src = st.session_state.get("overlay_source")
+        src = st.session_state.overlay_source
         if src:
             img = render_page_with_bboxes(str(src["image_path"]), src["bboxes"])
             if img:
-                st.image(img, caption=f"Page {src['page']}", use_container_width=True)
+                st.image(img, caption=f"Page {src['page']} — highlighted citation", use_container_width=True)
             else:
                 st.warning(
-                    f"Page {src['page']} image not found at `{src['image_path']}`. "
-                    "Re-index the document to regenerate page images."
+                    f"Page image not found at `{src['image_path']}`. "
+                    "Re-index to regenerate page images."
                 )
+            with st.expander("📐 Raw bounding boxes"):
+                st.json(src["bboxes"])
         else:
-            st.info("Source pages will appear here after a query.")
+            st.info("Source pages appear here after a query.")
+
+        # Index stats
+        stats = st.session_state.index_stats
+        if stats:
+            st.divider()
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Chunks",  stats.get("chunks", "—"))
+            c2.metric("Graph nodes", stats.get("nodes", "—"))
+            c3.metric("Graph edges", stats.get("edges", "—"))
 
 
-def _extract_sources_from_messages(messages: list[object]) -> list[dict[str, object]]:
-    from langchain_core.messages import ToolMessage  # noqa: PLC0415
-    import re, ast  # noqa: PLC0415, E401
-
-    sources: list[dict[str, object]] = []
-    seen_pages: set[int] = set()
-
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _parse_self_rag_stats(messages: list) -> dict:
+    """Best-effort: scan ToolMessage content for Self-RAG log lines."""
+    kept = dropped = 0
     for msg in messages:
-        if not isinstance(msg, ToolMessage):
-            continue
-        for match in re.finditer(
-            r"\[source: page (\d+), bboxes=(\[\[.*?\]\]), image_path=('.*?'|\".*?\")",
-            str(msg.content),
-            re.DOTALL,
-        ):
-            if len(sources) >= _MAX_SOURCE_PILLS:
-                break
-            try:
-                page = int(match.group(1))
-                if page in seen_pages:
-                    continue
-                bboxes = ast.literal_eval(match.group(2))
-                image_path = ast.literal_eval(match.group(3))
-                if not image_path or not Path(image_path).exists():
-                    fallback = OUTPUT_DIR / "pages" / f"page_{page:04d}.png"
-                    if fallback.exists():
-                        image_path = str(fallback)
-                sources.append({"page": page, "bboxes": bboxes, "image_path": image_path})
-                seen_pages.add(page)
-            except Exception:  # noqa: BLE001
-                pass
-        if len(sources) >= _MAX_SOURCE_PILLS:
-            break
-    return sources
+        if isinstance(msg, ToolMessage):
+            for m in re.finditer(r"Self-RAG filter: (\d+) kept, (\d+) dropped", str(msg.content)):
+                kept   += int(m.group(1))
+                dropped += int(m.group(2))
+    return {"kept": kept, "dropped": dropped} if kept or dropped else {}
 
 
 if __name__ == "__main__":

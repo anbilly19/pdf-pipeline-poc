@@ -3,7 +3,7 @@
 Fully offline — no I/O, no models.
 Verifies:
   - bridging chunks are inserted between consecutive text pairs
-  - bridge text = tail[-overlap:] + head[:overlap]
+  - bridge text = tail[-overlap:].strip() + head[:overlap].strip()
   - bridge chunk_type is 'overlap'
   - table chunks are never bridged
   - cross-page overlaps carry unioned bboxes
@@ -104,16 +104,29 @@ class TestOverlapBridging:
         assert types == ["text", "overlap", "text"]
 
     def test_bridge_text_contains_tail_and_head(self) -> None:
-        tail_text = "word " * 20   # long enough to exceed overlap window
+        """Bridge contains the tail slice and head slice exactly as the code produces them.
+
+        The code does:
+            tail_text = chunk.text[-overlap_chars:].strip()
+            head_text = next_chunk.text[:overlap_chars].strip()
+            bridge_text = f"{tail_text} {head_text}"
+
+        So we must compute the expected substrings the same way — slice first,
+        then strip — not strip the full string before slicing.
+        """
+        tail_text = "word " * 20   # 100 chars, longer than overlap window
         head_text = "other " * 20
         raw = [_chunk(tail_text), _chunk(head_text)]
         chunker = self._chunker(overlap=0.12, max_chars=800)
         result = chunker._add_overlap(raw)
         bridge = result[1]
         # overlap_chars = max(40, int(800 * 0.12)) = 96
+        overlap_chars = max(40, int(800 * 0.12))
+        expected_tail = tail_text[-overlap_chars:].strip()
+        expected_head = head_text[:overlap_chars].strip()
         assert bridge.chunk_type == "overlap"
-        assert tail_text.strip()[-96:].strip() in bridge.text
-        assert head_text.strip()[:96].strip() in bridge.text
+        assert expected_tail in bridge.text
+        assert expected_head in bridge.text
 
     def test_bridge_chunk_type_is_overlap(self) -> None:
         raw = [_chunk("x " * 60), _chunk("y " * 60)]

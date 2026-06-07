@@ -22,14 +22,12 @@ If ``checkpointer=None`` (the default), the graph behaves exactly as
 before: stateless, no memory, one agent object per query.  Pass a
 MemorySaver (or SqliteSaver) to enable multi-turn memory.
 
-GPU note
----------
-Ollama is forced to CPU-only via ``num_gpu=0``.  This ensures models like
-phi4-mini-reasoning that are not quantized for GPU offloading work without
-falling back to an incompatible hybrid mode or crashing on systems where
-the model cannot be fully loaded into VRAM.
-Set the ``OLLAMA_NUM_GPU`` environment variable to override (e.g. to -1 for
-auto-detect on machines with a compatible GPU).
+GPU / CPU note
+--------------
+Ollama defaults to CPU-only (num_gpu=0) + cpu_avx2 backend (set in
+src/silence.py which runs first).  phi4-mini-reasoning also gets a reduced
+context window (2048 tokens) to keep RAM usage manageable on CPU.
+Set OLLAMA_NUM_GPU=-1 in .env to re-enable GPU auto-detect.
 """
 from __future__ import annotations
 
@@ -51,10 +49,17 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # GPU control
 # ---------------------------------------------------------------------------
-# Default: CPU-only (num_gpu=0) so that any Ollama model works regardless of
-# whether it can be fully offloaded to the GPU.  Operators with a compatible
-# GPU can set OLLAMA_NUM_GPU=-1 (auto) or a positive integer in their .env.
+# 0  = CPU-only (default, safe for all models)
+# -1 = Ollama auto-detect (use when GPU has enough VRAM)
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "0"))
+
+# Per-model context window overrides.
+# phi4-mini-reasoning is a reasoning model that generates verbose chain-of-
+# thought; a large num_ctx eats RAM fast on CPU, so we cap it at 2048.
+_MODEL_NUM_CTX: dict[str, int] = {
+    "phi4-mini-reasoning:3.8b": 2048,
+}
+_DEFAULT_NUM_CTX: int = 4096
 
 
 def build_agent(
@@ -112,7 +117,7 @@ def build_agent(
             messages.append(
                 SystemMessage(
                     content=(
-                        "Folgende Dokumentenauszüge wurden für diese Anfrage abgerufen:\n\n"
+                        "Folgende Dokumentenausz\u00fcge wurden f\u00fcr diese Anfrage abgerufen:\n\n"
                         + ctx_text
                     )
                 )
@@ -138,26 +143,34 @@ def build_agent(
 def _build_llm(provider: str, model: str) -> Any:
     """Instantiate the LLM.
 
-    For Ollama, ``num_gpu=0`` forces CPU-only inference.  This is the safe
-    default for models like phi4-mini-reasoning that may fail or produce
-    garbage output when only partially offloaded to a GPU.
+    For Ollama:
+    - num_gpu=0 forces CPU-only (OLLAMA_NUM_GPU env var overrides).
+    - OLLAMA_LLM_LIBRARY=cpu_avx2 is set in silence.py before any imports.
+    - num_ctx is set per-model: phi4-mini-reasoning gets 2048 to cap RAM
+      usage; all other models get 4096 (Ollama default).
 
-    Override via the ``OLLAMA_NUM_GPU`` environment variable:
-        OLLAMA_NUM_GPU=-1   # Ollama auto-detects how many layers fit on GPU
-        OLLAMA_NUM_GPU=20   # offload exactly 20 layers (partial GPU)
+    Override via .env:
+        OLLAMA_NUM_GPU=-1   # auto GPU
         OLLAMA_NUM_GPU=0    # CPU-only (default)
     """
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # noqa: PLC0415
         return ChatOpenAI(model=model, temperature=0)
+
     from langchain_ollama import ChatOllama  # noqa: PLC0415
-    return ChatOllama(model=model, temperature=0, num_gpu=_OLLAMA_NUM_GPU)
+    num_ctx = _MODEL_NUM_CTX.get(model, _DEFAULT_NUM_CTX)
+    return ChatOllama(
+        model=model,
+        temperature=0,
+        num_gpu=_OLLAMA_NUM_GPU,
+        num_ctx=num_ctx,
+    )
 
 
 def _system_prompt(domain_spec: DomainSpec | None) -> str:
     base = (
-        "Du bist ein präziser Dokumentenanalyst. "
-        "Beantworte Fragen ausschließlich auf Basis des bereitgestellten Dokuments. "
+        "Du bist ein pr\u00e4ziser Dokumentenanalyst. "
+        "Beantworte Fragen ausschlie\u00dflich auf Basis des bereitgestellten Dokuments. "
         "Wenn die Information nicht im Dokument steht, sage das klar. "
         "Antworte auf Deutsch."
     )

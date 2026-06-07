@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage
 from src.agent.graph import build_agent
 from src.agent.router import route_query
 from src.agent.domain_config import load_active_config
+from src.graph.builder import load_graph
 from src.retrieval.embedder import ChunkEmbedder
 from src.retrieval.retriever import BBoxRetriever
 from src.retrieval.store import FAISSStore
@@ -33,6 +34,15 @@ def run_cli(provider: str = "ollama", model: str = "gemma4:e2b") -> None:
     store = FAISSStore()
     retriever = BBoxRetriever(store=store, embedder=embedder, top_k=5)
     doc_config = load_active_config()
+
+    # Load knowledge graph (non-fatal if missing — first run before indexing)
+    graph_path = store._persist_dir / "graph.json"
+    knowledge_graph = load_graph(graph_path)
+    all_chunks = store.get_all_chunks()
+    if knowledge_graph.number_of_nodes() > 0:
+        logger.info("Knowledge graph loaded: %d nodes, %d edges", knowledge_graph.number_of_nodes(), knowledge_graph.number_of_edges())
+    else:
+        logger.info("No knowledge graph found at %s — graph expansion disabled", graph_path)
 
     tracing = os.getenv("LANGCHAIN_TRACING_V2", "false")
     print(f"\nPDF Agent ready (provider={provider}, doc_type={doc_config.doc_type}, tracing={tracing})")
@@ -59,6 +69,8 @@ def run_cli(provider: str = "ollama", model: str = "gemma4:e2b") -> None:
             provider=provider,
             model=model,
             domain_spec=domain_spec,
+            graph=knowledge_graph,
+            all_chunks=all_chunks,
         )
         result = agent.invoke({"messages": [HumanMessage(content=user_input)]})
         print(f"\nAssistant: {result['messages'][-1].content}\n")

@@ -184,6 +184,24 @@ class FAISSStore:
 
         return chunks
 
+    def get_all_chunks(self) -> list[Chunk]:
+        """Return every stored chunk in insertion order.
+
+        Used by the graph expander which needs the full corpus to resolve
+        chunk indices from the knowledge graph.
+        """
+        return [
+            Chunk(
+                text=self._texts[i],
+                page_number=int(meta["page_number"]),
+                bboxes=meta["bboxes"],  # type: ignore[arg-type]
+                chunk_type=meta["chunk_type"],  # type: ignore[arg-type]
+                confidence=float(meta["confidence"]),
+                image_path=str(meta["image_path"]),
+            )
+            for i, meta in enumerate(self._metadata)
+        ]
+
     def count(self) -> int:
         """Return total number of stored chunks."""
         return len(self._metadata)

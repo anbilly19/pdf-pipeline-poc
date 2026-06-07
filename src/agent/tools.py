@@ -39,7 +39,33 @@ NO_SECTION = "Section not found."
 NO_REGION = "No region found on page."
 
 
-def build_tools(retriever: BBoxRetriever) -> list[object]:
+def build_tools(
+    retriever: BBoxRetriever,
+    graph: object = None,       # nx.DiGraph | None
+    all_chunks: list[Chunk] | None = None,
+) -> list[object]:
+    """Build LangChain tools.
+
+    Args:
+        retriever: Hybrid FAISS+BM25 retriever.
+        graph: Optional NetworkX DiGraph from the knowledge graph builder.
+               When provided together with all_chunks, every retrieval result
+               is passed through the graph expander for depth-1 expansion.
+        all_chunks: Full ordered corpus required by the graph expander.
+    """
+
+    _graph_enabled = graph is not None and all_chunks is not None
+
+    def _expand(chunks: list[Chunk]) -> list[Chunk]:
+        """Apply graph expansion if the graph is available, else no-op."""
+        if not _graph_enabled or not chunks:
+            return chunks
+        try:
+            from src.graph.expander import expand_chunks  # noqa: PLC0415
+            return expand_chunks(chunks, graph, all_chunks)  # type: ignore[arg-type]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Graph expansion failed (non-fatal): %s", exc)
+            return chunks
 
     @tool
     def search_term(
@@ -55,6 +81,8 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
         chunks = retriever.retrieve(query, top_k=_TOP_K)
         if not chunks:
             return NO_RESULTS
+
+        chunks = _expand(chunks)
 
         parts = ["GEFUNDENE ABSCHNITTE (lies alle durch):\n"]
         for i, c in enumerate(chunks, 1):
@@ -95,6 +123,8 @@ def build_tools(retriever: BBoxRetriever) -> list[object]:
         chunks = retriever.retrieve(title, top_k=4)
         if not chunks:
             return NO_SECTION
+
+        chunks = _expand(chunks)
 
         combined = "\n\n".join(c.text for c in chunks)
         all_bboxes = [bbox for c in chunks for bbox in c.bboxes]

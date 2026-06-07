@@ -21,9 +21,19 @@ Backward compatibility
 If ``checkpointer=None`` (the default), the graph behaves exactly as
 before: stateless, no memory, one agent object per query.  Pass a
 MemorySaver (or SqliteSaver) to enable multi-turn memory.
+
+GPU note
+---------
+Ollama is forced to CPU-only via ``num_gpu=0``.  This ensures models like
+phi4-mini-reasoning that are not quantized for GPU offloading work without
+falling back to an incompatible hybrid mode or crashing on systems where
+the model cannot be fully loaded into VRAM.
+Set the ``OLLAMA_NUM_GPU`` environment variable to override (e.g. to -1 for
+auto-detect on machines with a compatible GPU).
 """
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import SystemMessage
@@ -37,6 +47,14 @@ from src.models import Chunk
 if TYPE_CHECKING:
     from src.agent.domain_config import DomainSpec
     from src.retrieval.retriever import BBoxRetriever
+
+# ---------------------------------------------------------------------------
+# GPU control
+# ---------------------------------------------------------------------------
+# Default: CPU-only (num_gpu=0) so that any Ollama model works regardless of
+# whether it can be fully offloaded to the GPU.  Operators with a compatible
+# GPU can set OLLAMA_NUM_GPU=-1 (auto) or a positive integer in their .env.
+_OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "0"))
 
 
 def build_agent(
@@ -118,11 +136,22 @@ def build_agent(
 
 
 def _build_llm(provider: str, model: str) -> Any:
+    """Instantiate the LLM.
+
+    For Ollama, ``num_gpu=0`` forces CPU-only inference.  This is the safe
+    default for models like phi4-mini-reasoning that may fail or produce
+    garbage output when only partially offloaded to a GPU.
+
+    Override via the ``OLLAMA_NUM_GPU`` environment variable:
+        OLLAMA_NUM_GPU=-1   # Ollama auto-detects how many layers fit on GPU
+        OLLAMA_NUM_GPU=20   # offload exactly 20 layers (partial GPU)
+        OLLAMA_NUM_GPU=0    # CPU-only (default)
+    """
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # noqa: PLC0415
         return ChatOpenAI(model=model, temperature=0)
     from langchain_ollama import ChatOllama  # noqa: PLC0415
-    return ChatOllama(model=model, temperature=0)
+    return ChatOllama(model=model, temperature=0, num_gpu=_OLLAMA_NUM_GPU)
 
 
 def _system_prompt(domain_spec: DomainSpec | None) -> str:

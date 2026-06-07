@@ -4,23 +4,22 @@ Pipeline:
     query
         -> FAISS top-(top_k * faiss_multiplier) candidates by cosine similarity
         -> BM25 rerank over those candidates
+        -> page-range boost: chunks from early pages (Kurzfassung) get a
+           score multiplier when the query contains contract-specific keywords
         -> OllamaReranker cross-encoder pass (if reranker is configured)
         -> top_k returned to LLM
 
 BM25 fixes the core problem where nomic-embed-text ranks German legal
 keywords poorly: BM25 is exact-term based and always surfaces chunks
-that literally contain the query words (e.g. "Reaktionszeit", "Vertragsstrafe").
+that literally contain the query words.
 
-Cross-encoder rerank (roadmap #1)
------------------------------------
-Pass an OllamaReranker instance to BBoxRetriever.__init__ to enable the
-third reranking pass.  Falls back to BM25 order silently if Ollama is
-unavailable so the pipeline is never blocked.
-
-Fallback chain:
-  FAISS order -> BM25 order -> cross-encoder order (best available wins)
-
-Dependencies: rank-bm25 (pure Python, no native libs)
+Kurzfassung boost (field-test fix)
+------------------------------------
+The short contract form (pages 1-2) contains contract-specific clauses
+(Verlängerungsoption, Verschwiegenheit, Leistungsumfang) that get buried
+by the much longer AGB section. When the query contains any of a set of
+Kurzfassung-specific keywords, chunks from pages 1-2 receive a 1.5x BM25
+score multiplier before the final ranking.
 """
 from __future__ import annotations
 
@@ -37,18 +36,29 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_FAISS_MULTIPLIER = 4  # fetch 4x candidates from FAISS before BM25 rerank
+_FAISS_MULTIPLIER = 4
+
+# Keywords that signal the query is about contract-specific (Kurzfassung) content.
+# When any of these appear in the query, pages 1-2 get a score boost.
+_KURZFASSUNG_KEYWORDS = {
+    "verlängerungsoption", "verlängerung", "verschwiegenheit", "vertragsnummer",
+    "leistungsumfang", "honorarvereinbarung", "mitteilungsblatt", "seminarbeginn",
+    "bundesakademie", "absage", "teilnehmerzahl", "sonderveranstaltung",
+    "reisekosten", "reisezeiten", "zuschlagserteilung",
+}
+_KURZFASSUNG_MAX_PAGE = 2   # pages 1-2 are the Kurzfassung
+_KURZFASSUNG_BOOST = 1.5    # score multiplier for Kurzfassung chunks
 
 
 def _tokenize(text: str) -> list[str]:
-    """Whitespace + punctuation tokenizer for BM25 with full German character support.
-
-    Includes:
-    - Basic Latin extended (\u00c0-\u024f) for umlauts (\u00e4, \u00f6, \u00fc, \u00c4, \u00d6, \u00dc)
-    - \u00df (\u00df) explicitly included
-    - All matched tokens lowercased
-    """
+    """Whitespace + punctuation tokenizer for BM25 with full German character support."""
     return re.findall(r"[\w\u00c0-\u024f\u00df]+", text.lower())
+
+
+def _is_kurzfassung_query(query: str) -> bool:
+    """Return True if the query contains any Kurzfassung-specific keywords."""
+    tokens = set(_tokenize(query))
+    return bool(tokens & _KURZFASSUNG_KEYWORDS)
 
 
 class BBoxRetriever:
@@ -60,7 +70,6 @@ class BBoxRetriever:
         top_k: Final number of results returned to the caller.
         faiss_multiplier: How many times top_k to fetch from FAISS before reranking.
         reranker: Optional OllamaReranker for cross-encoder second pass.
-                  When None, pipeline stops after BM25.
     """
 
     def __init__(
@@ -86,7 +95,8 @@ class BBoxRetriever:
     ) -> list[Chunk]:
         """Retrieve the most relevant chunks using hybrid search.
 
-        Pipeline: FAISS candidates -> BM25 rerank -> optional cross-encoder rerank.
+        Pipeline: FAISS candidates -> BM25 rerank -> Kurzfassung boost
+        -> optional cross-encoder rerank.
 
         Args:
             query: Natural language question.
@@ -96,8 +106,6 @@ class BBoxRetriever:
 
         Returns:
             List of Chunk objects ordered by hybrid relevance (best first).
-            Falls back to FAISS order when BM25 yields no keyword overlap.
-            Falls back to BM25 order when cross-encoder is unavailable.
         """
         k = top_k or self._top_k
         candidates_k = min(k * self._faiss_multiplier, self._store.count() or 1)
@@ -113,8 +121,11 @@ class BBoxRetriever:
         if not candidates:
             return []
 
-        # Pass 1: BM25 keyword rerank
-        bm25_ranked = self._bm25_rerank(query, candidates, top_k=k)
+        # Pass 1: BM25 keyword rerank with optional Kurzfassung boost
+        boost_kurzfassung = _is_kurzfassung_query(query)
+        bm25_ranked = self._bm25_rerank(
+            query, candidates, top_k=k, boost_kurzfassung=boost_kurzfassung
+        )
 
         # Pass 2: cross-encoder rerank (optional)
         if self._reranker is not None:
@@ -123,9 +134,10 @@ class BBoxRetriever:
             final = bm25_ranked
 
         logger.info(
-            "Retrieve: %d FAISS -> %d BM25 -> %d final (reranker=%s, query: %.60s)",
+            "Retrieve: %d FAISS -> %d BM25%s -> %d final (reranker=%s, query: %.60s)",
             len(candidates),
             len(bm25_ranked),
+            " +Kurzfassung boost" if boost_kurzfassung else "",
             len(final),
             "on" if self._reranker else "off",
             query,
@@ -146,18 +158,24 @@ class BBoxRetriever:
         ]
 
     @staticmethod
-    def _bm25_rerank(query: str, chunks: list[Chunk], top_k: int) -> list[Chunk]:
+    def _bm25_rerank(
+        query: str,
+        chunks: list[Chunk],
+        top_k: int,
+        boost_kurzfassung: bool = False,
+    ) -> list[Chunk]:
         """Rerank chunks using BM25 keyword scoring.
 
         Falls back to original FAISS order if:
         - rank_bm25 is not installed, OR
-        - all BM25 scores are zero (no keyword overlap between query and candidates).
-          In that case the semantic FAISS ranking is already the best signal.
+        - all BM25 scores are zero (no keyword overlap).
 
         Args:
             query: The search query.
             chunks: Candidate chunks from FAISS.
             top_k: Number of chunks to return.
+            boost_kurzfassung: If True, multiply scores for pages 1-2 by
+                _KURZFASSUNG_BOOST to surface contract-specific clauses.
 
         Returns:
             Reranked list of up to top_k chunks.
@@ -165,20 +183,28 @@ class BBoxRetriever:
         try:
             from rank_bm25 import BM25Okapi  # noqa: PLC0415
         except ImportError:
-            logger.warning("rank-bm25 not installed, falling back to FAISS order. Run: uv add rank-bm25")
+            logger.warning("rank-bm25 not installed — falling back to FAISS order.")
             return chunks[:top_k]
 
         tokenized_corpus = [_tokenize(c.text) for c in chunks]
         tokenized_query = _tokenize(query)
 
         bm25 = BM25Okapi(tokenized_corpus)
-        scores = bm25.get_scores(tokenized_query)
+        scores = list(bm25.get_scores(tokenized_query))
 
         if max(scores, default=0.0) <= 0.0:
-            logger.debug(
-                "BM25 all-zero scores for query %.60s \u2014 keeping FAISS order", query
-            )
+            logger.debug("BM25 all-zero for query %.60s — keeping FAISS order", query)
             return chunks[:top_k]
+
+        # Apply Kurzfassung page boost
+        if boost_kurzfassung:
+            for i, chunk in enumerate(chunks):
+                if chunk.page_number <= _KURZFASSUNG_MAX_PAGE:
+                    scores[i] *= _KURZFASSUNG_BOOST
+                    logger.debug(
+                        "Kurzfassung boost applied to page %d (score %.3f)",
+                        chunk.page_number, scores[i],
+                    )
 
         ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
         return [c for _, c in ranked[:top_k]]

@@ -8,6 +8,7 @@ Roadmap #7 — Modern UI
   - Chat: streaming-style typing indicator, domain badge, source pills
   - Page viewer: highlighted bbox overlay, page navigation pills
   - Status bar: index stats, graph node/edge count, Self-RAG keep-rate
+  - Default model: qwen2.5:3b (field-tested better than gemma4:e2b on German legal)
 """
 from __future__ import annotations
 
@@ -44,7 +45,8 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-_OLLAMA_MODELS = ["gemma4:e2b", "qwen2.5:3b", "qwen2.5:7b", "llama3.2:3b", "llama3.1:8b", "mistral:7b"]
+# qwen2.5:3b is the field-tested default — better German legal fact extraction
+_OLLAMA_MODELS = ["qwen2.5:3b", "qwen2.5:7b", "gemma4:e2b", "llama3.2:3b", "llama3.1:8b", "mistral:7b"]
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
 _MAX_SOURCE_PILLS = 5
@@ -54,10 +56,8 @@ _MAX_SOURCE_PILLS = 5
 # ---------------------------------------------------------------------------
 _CSS = """
 <style>
-/* ── Google font ─────────────────────────────────────────────────────── */
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
 
-/* ── Root tokens ─────────────────────────────────────────────────────── */
 :root {
   --bg:            #171614;
   --surface:       #1c1b19;
@@ -72,18 +72,15 @@ _CSS = """
   --font:          'Inter', sans-serif;
 }
 
-/* ── Global reset ────────────────────────────────────────────────────── */
 html, body, [class*="css"] { font-family: var(--font) !important; }
 .stApp { background: var(--bg) !important; color: var(--text) !important; }
 
-/* ── Sidebar ─────────────────────────────────────────────────────────── */
 [data-testid="stSidebar"] {
   background: var(--surface) !important;
   border-right: 1px solid var(--border) !important;
 }
 [data-testid="stSidebar"] * { color: var(--text) !important; }
 
-/* ── Chat messages ───────────────────────────────────────────────────── */
 [data-testid="stChatMessage"] {
   background: var(--surface) !important;
   border: 1px solid var(--border) !important;
@@ -91,7 +88,6 @@ html, body, [class*="css"] { font-family: var(--font) !important; }
   margin-bottom: .5rem !important;
 }
 
-/* ── Input box ───────────────────────────────────────────────────────── */
 [data-testid="stChatInput"] textarea {
   background: var(--surface-2) !important;
   border: 1px solid var(--border) !important;
@@ -103,7 +99,6 @@ html, body, [class*="css"] { font-family: var(--font) !important; }
   box-shadow: 0 0 0 3px var(--primary-glow) !important;
 }
 
-/* ── Buttons ─────────────────────────────────────────────────────────── */
 .stButton > button {
   background: var(--surface-2) !important;
   border: 1px solid var(--border) !important;
@@ -122,11 +117,8 @@ html, body, [class*="css"] { font-family: var(--font) !important; }
   border-color: var(--primary) !important;
   color: #fff !important;
 }
-.stButton > button[kind="primary"]:hover {
-  background: #3a7f8a !important;
-}
+.stButton > button[kind="primary"]:hover { background: #3a7f8a !important; }
 
-/* ── Cards / metric boxes ────────────────────────────────────────────── */
 [data-testid="stMetric"] {
   background: var(--surface) !important;
   border: 1px solid var(--border) !important;
@@ -136,7 +128,6 @@ html, body, [class*="css"] { font-family: var(--font) !important; }
 [data-testid="stMetricValue"] { color: var(--primary) !important; font-weight: 600 !important; }
 [data-testid="stMetricLabel"] { color: var(--text-muted) !important; font-size: .75rem !important; }
 
-/* ── Selectbox / radio ───────────────────────────────────────────────── */
 [data-testid="stSelectbox"] > div,
 [data-baseweb="select"] > div {
   background: var(--surface-2) !important;
@@ -144,17 +135,13 @@ html, body, [class*="css"] { font-family: var(--font) !important; }
   border-radius: var(--radius) !important;
 }
 
-/* ── Expander ────────────────────────────────────────────────────────── */
 [data-testid="stExpander"] {
   background: var(--surface) !important;
   border: 1px solid var(--border) !important;
   border-radius: var(--radius) !important;
 }
 
-/* ── Source pill strip ───────────────────────────────────────────────── */
-.source-strip {
-  display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .4rem;
-}
+.source-strip { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .4rem; }
 .source-pill {
   background: var(--primary-glow);
   border: 1px solid var(--primary);
@@ -168,7 +155,6 @@ html, body, [class*="css"] { font-family: var(--font) !important; }
 }
 .source-pill:hover { background: var(--primary); color: #fff; }
 
-/* ── Domain badge ────────────────────────────────────────────────────── */
 .domain-badge {
   display: inline-block;
   background: rgba(232,175,52,.12);
@@ -181,7 +167,6 @@ html, body, [class*="css"] { font-family: var(--font) !important; }
   margin-left: .4rem;
 }
 
-/* ── Status bar ──────────────────────────────────────────────────────── */
 .status-bar {
   display: flex; gap: 1.5rem; align-items: center;
   padding: .45rem .75rem;
@@ -197,10 +182,7 @@ html, body, [class*="css"] { font-family: var(--font) !important; }
 .dot-yellow { width:7px; height:7px; border-radius:50%; background:#e8af34; display:inline-block; }
 .dot-red    { width:7px; height:7px; border-radius:50%; background:#dd6974; display:inline-block; }
 
-/* ── Dividers ────────────────────────────────────────────────────────── */
 hr { border-color: var(--border) !important; }
-
-/* ── Scrollbar ───────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: var(--bg); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -221,8 +203,8 @@ def _init_session() -> None:
         "active_model": _OLLAMA_MODELS[0],
         "doc_config": None,
         "active_domain": None,
-        "index_stats": {},          # {chunks, nodes, edges}
-        "self_rag_stats": {},        # {kept, dropped} from last query
+        "index_stats": {},
+        "self_rag_stats": {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -266,7 +248,7 @@ def _clear_index(store: FAISSStore) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Source extraction from tool messages
+# Source extraction
 # ---------------------------------------------------------------------------
 def _extract_sources(messages: list) -> list[dict]:
     sources: list[dict] = []
@@ -298,7 +280,7 @@ def _extract_sources(messages: list) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Status bar HTML
+# Status bar
 # ---------------------------------------------------------------------------
 def _status_bar_html(
     indexed_doc: str | None,
@@ -313,13 +295,13 @@ def _status_bar_html(
             '<span><span class="dot-red"></span>No document indexed</span>'
             '</div>'
         )
-    chunks = stats.get("chunks", "—")
-    nodes  = stats.get("nodes", "—")
-    edges  = stats.get("edges", "—")
-    kept   = self_rag_stats.get("kept", "—")
+    chunks  = stats.get("chunks", "—")
+    nodes   = stats.get("nodes",  "—")
+    edges   = stats.get("edges",  "—")
+    kept    = self_rag_stats.get("kept",    "—")
     dropped = self_rag_stats.get("dropped", "—")
-    rag_dot = "dot-green" if self_rag_enabled else "dot-yellow"
-    rag_label = f"Self-RAG ▸ kept {kept} / dropped {dropped}" if self_rag_enabled else "Self-RAG off"
+    rag_dot   = "dot-green"  if self_rag_enabled else "dot-yellow"
+    rag_label = f"Self-RAG ▸ {kept} kept / {dropped} dropped" if self_rag_enabled else "Self-RAG off"
     reranker_dot = "dot-green" if reranker_on else "dot-yellow"
     return (
         '<div class="status-bar">'
@@ -354,7 +336,6 @@ def main() -> None:
             st.caption("🔍 LangSmith tracing on")
         st.divider()
 
-        # Provider + model
         provider = st.radio("Provider", ["ollama", "openai"], horizontal=True)
         model = st.selectbox(
             "Model",
@@ -364,8 +345,6 @@ def main() -> None:
             st.warning("OPENAI_API_KEY not set in .env")
 
         st.divider()
-
-        # Pipeline toggles
         enable_reranker = st.toggle("Cross-encoder reranker", value=True)
         enable_self_rag = st.toggle("Self-RAG filter", value=True)
         if enable_self_rag:
@@ -378,8 +357,6 @@ def main() -> None:
             self_rag_gate = 0.5
 
         st.divider()
-
-        # Upload + index
         uploaded = st.file_uploader("Upload PDF", type="pdf")
         if uploaded and st.button("⚡ Index document", type="primary", use_container_width=True):
             pdf_path = DATA_DIR / uploaded.name
@@ -395,7 +372,6 @@ def main() -> None:
                 n = indexer.index(pdf_path)
                 doc_config: DocTypeConfig = indexer.last_doc_type or load_active_config()
 
-            # Load graph stats
             graph_path = store._persist_dir / "graph.json"
             kg = load_graph(graph_path)
             st.session_state.index_stats = {
@@ -403,19 +379,18 @@ def main() -> None:
                 "nodes": kg.number_of_nodes(),
                 "edges": kg.number_of_edges(),
             }
-            st.session_state.indexed_doc = pdf_path.stem
-            st.session_state.doc_config = doc_config
+            st.session_state.indexed_doc   = pdf_path.stem
+            st.session_state.doc_config    = doc_config
             st.session_state.active_provider = provider
-            st.session_state.active_model = model
-            st.session_state.messages = []
-            st.session_state.overlay_source = None
-            st.session_state.latest_sources = []
-            st.session_state.self_rag_stats = {}
-            st.session_state.active_domain = None
+            st.session_state.active_model    = model
+            st.session_state.messages        = []
+            st.session_state.overlay_source  = None
+            st.session_state.latest_sources  = []
+            st.session_state.self_rag_stats  = {}
+            st.session_state.active_domain   = None
             st.success(f"✅ {n} chunks indexed · {kg.number_of_nodes()} graph nodes")
             st.info(f"Doc type: **{doc_config.display_name}**")
 
-        # Active doc summary
         if st.session_state.indexed_doc:
             st.divider()
             doc_cfg: DocTypeConfig | None = st.session_state.doc_config
@@ -428,10 +403,10 @@ def main() -> None:
 
         st.divider()
         if st.button("🗑 Clear conversation", use_container_width=True):
-            st.session_state.messages = []
+            st.session_state.messages       = []
             st.session_state.overlay_source = None
             st.session_state.latest_sources = []
-            st.session_state.active_domain = None
+            st.session_state.active_domain  = None
             st.session_state.self_rag_stats = {}
             st.rerun()
 
@@ -447,15 +422,13 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # ── Two-column layout ─────────────────────────────────────────────────
+    # ── Layout ────────────────────────────────────────────────────────────
     chat_col, view_col = st.columns([3, 2], gap="large")
 
-    # ── Chat column ───────────────────────────────────────────────────────
     with chat_col:
         if not st.session_state.indexed_doc:
             st.info("👈 Upload and index a PDF to start chatting.")
         else:
-            # Render history
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
                     st.markdown(msg["content"])
@@ -470,36 +443,25 @@ def main() -> None:
                                 f'<span class="source-pill">p.{s["page"]}</span>'
                                 for s in msg["sources"]
                             )
-                            meta_parts.append(
-                                f'<span class="source-strip">{pills}</span>'
-                            )
+                            meta_parts.append(f'<span class="source-strip">{pills}</span>')
                         if meta_parts:
-                            st.markdown(
-                                " ".join(meta_parts), unsafe_allow_html=True
-                            )
+                            st.markdown(" ".join(meta_parts), unsafe_allow_html=True)
 
-            # Input
             if prompt := st.chat_input("Ask a question about the document …"):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.chat_message("user"):
                     st.markdown(prompt)
 
-                # Route
                 doc_config = st.session_state.doc_config or load_active_config()
                 domain_spec = route_query(prompt, config=doc_config)
                 st.session_state.active_domain = domain_spec.display_name
 
                 with st.chat_message("assistant"):
                     with st.spinner(f"Thinking · {domain_spec.display_name} …"):
-                        # Build fully wired agent
-                        retriever = _get_retriever(
-                            store, embedder,
-                            enable_reranker=enable_reranker,
-                        )
+                        retriever = _get_retriever(store, embedder, enable_reranker=enable_reranker)
                         graph_path = store._persist_dir / "graph.json"
                         kg = load_graph(graph_path)
                         all_chunks = store.get_all_chunks()
-
                         agent = build_agent(
                             retriever=retriever,
                             provider=st.session_state.active_provider,
@@ -516,13 +478,10 @@ def main() -> None:
                         answer = result["messages"][-1].content
 
                     st.markdown(answer)
-
-                    # Source pills inline
                     sources = _extract_sources(result["messages"])
                     if sources:
                         pills_html = '<div class="source-strip">' + "".join(
-                            f'<span class="source-pill">p.{s["page"]}</span>'
-                            for s in sources
+                            f'<span class="source-pill">p.{s["page"]}</span>' for s in sources
                         ) + "</div>"
                         st.markdown(pills_html, unsafe_allow_html=True)
                     st.markdown(
@@ -530,14 +489,10 @@ def main() -> None:
                         unsafe_allow_html=True,
                     )
 
-                # Parse Self-RAG stats from logs (best-effort)
-                st.session_state.self_rag_stats = _parse_self_rag_stats(
-                    result["messages"]
-                )
-                st.session_state.latest_sources = sources
+                st.session_state.self_rag_stats  = _parse_self_rag_stats(result["messages"])
+                st.session_state.latest_sources  = sources
                 if sources:
                     st.session_state.overlay_source = sources[0]
-
                 st.session_state.messages.append({
                     "role": "assistant",
                     "content": answer,
@@ -546,10 +501,8 @@ def main() -> None:
                 })
                 st.rerun()
 
-    # ── Page viewer column ────────────────────────────────────────────────
     with view_col:
         st.markdown("#### 🔍 Source Viewer")
-
         latest = st.session_state.latest_sources
         if latest:
             st.caption("Click a page to view highlighted source:")
@@ -575,26 +528,24 @@ def main() -> None:
         else:
             st.info("Source pages appear here after a query.")
 
-        # Index stats
         stats = st.session_state.index_stats
         if stats:
             st.divider()
             c1, c2, c3 = st.columns(3)
-            c1.metric("Chunks",  stats.get("chunks", "—"))
-            c2.metric("Graph nodes", stats.get("nodes", "—"))
-            c3.metric("Graph edges", stats.get("edges", "—"))
+            c1.metric("Chunks",       stats.get("chunks", "—"))
+            c2.metric("Graph nodes",  stats.get("nodes",  "—"))
+            c3.metric("Graph edges",  stats.get("edges",  "—"))
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 def _parse_self_rag_stats(messages: list) -> dict:
-    """Best-effort: scan ToolMessage content for Self-RAG log lines."""
     kept = dropped = 0
     for msg in messages:
         if isinstance(msg, ToolMessage):
             for m in re.finditer(r"Self-RAG filter: (\d+) kept, (\d+) dropped", str(msg.content)):
-                kept   += int(m.group(1))
+                kept    += int(m.group(1))
                 dropped += int(m.group(2))
     return {"kept": kept, "dropped": dropped} if kept or dropped else {}
 

@@ -1,17 +1,24 @@
-"""Hybrid retriever: FAISS embedding candidates reranked by BM25.
+"""Hybrid retriever: FAISS -> BM25 -> optional cross-encoder rerank.
 
 Pipeline:
     query
         -> FAISS top-(top_k * faiss_multiplier) candidates by cosine similarity
         -> BM25 rerank over those candidates
+        -> OllamaReranker cross-encoder pass (if reranker is configured)
         -> top_k returned to LLM
 
-This fixes the core problem where nomic-embed-text ranks German legal
+BM25 fixes the core problem where nomic-embed-text ranks German legal
 keywords poorly: BM25 is exact-term based and always surfaces chunks
 that literally contain the query words (e.g. "Reaktionszeit", "Vertragsstrafe").
 
-Fallback: if all BM25 scores are zero (no keyword overlap), the original
-FAISS ranking is preserved so semantic results are not discarded.
+Cross-encoder rerank (roadmap #1)
+-----------------------------------
+Pass an OllamaReranker instance to BBoxRetriever.__init__ to enable the
+third reranking pass.  Falls back to BM25 order silently if Ollama is
+unavailable so the pipeline is never blocked.
+
+Fallback chain:
+  FAISS order -> BM25 order -> cross-encoder order (best available wins)
 
 Dependencies: rank-bm25 (pure Python, no native libs)
 """
@@ -19,10 +26,14 @@ from __future__ import annotations
 
 import logging
 import re
+from typing import TYPE_CHECKING
 
 from src.models import Chunk, Source
 from src.retrieval.embedder import ChunkEmbedder
 from src.retrieval.store import FAISSStore
+
+if TYPE_CHECKING:
+    from src.retrieval.reranker import OllamaReranker
 
 logger = logging.getLogger(__name__)
 
@@ -33,21 +44,23 @@ def _tokenize(text: str) -> list[str]:
     """Whitespace + punctuation tokenizer for BM25 with full German character support.
 
     Includes:
-    - Basic Latin extended (\u00c0-\u024f) for umlauts (ä, ö, ü, Ä, Ö, Ü)
-    - ß (\u00df) explicitly included
+    - Basic Latin extended (\u00c0-\u024f) for umlauts (\u00e4, \u00f6, \u00fc, \u00c4, \u00d6, \u00dc)
+    - \u00df (\u00df) explicitly included
     - All matched tokens lowercased
     """
     return re.findall(r"[\w\u00c0-\u024f\u00df]+", text.lower())
 
 
 class BBoxRetriever:
-    """Hybrid FAISS+BM25 retriever preserving full bbox metadata.
+    """Hybrid FAISS+BM25+reranker retriever preserving full bbox metadata.
 
     Args:
         store: Initialised FAISSStore.
         embedder: Initialised ChunkEmbedder.
         top_k: Final number of results returned to the caller.
         faiss_multiplier: How many times top_k to fetch from FAISS before reranking.
+        reranker: Optional OllamaReranker for cross-encoder second pass.
+                  When None, pipeline stops after BM25.
     """
 
     def __init__(
@@ -56,11 +69,13 @@ class BBoxRetriever:
         embedder: ChunkEmbedder,
         top_k: int = 15,
         faiss_multiplier: int = _FAISS_MULTIPLIER,
+        reranker: OllamaReranker | None = None,
     ) -> None:
         self._store = store
         self._embedder = embedder
         self._top_k = top_k
         self._faiss_multiplier = faiss_multiplier
+        self._reranker = reranker
 
     def retrieve(
         self,
@@ -71,6 +86,8 @@ class BBoxRetriever:
     ) -> list[Chunk]:
         """Retrieve the most relevant chunks using hybrid search.
 
+        Pipeline: FAISS candidates -> BM25 rerank -> optional cross-encoder rerank.
+
         Args:
             query: Natural language question.
             top_k: Override default result count.
@@ -80,6 +97,7 @@ class BBoxRetriever:
         Returns:
             List of Chunk objects ordered by hybrid relevance (best first).
             Falls back to FAISS order when BM25 yields no keyword overlap.
+            Falls back to BM25 order when cross-encoder is unavailable.
         """
         k = top_k or self._top_k
         candidates_k = min(k * self._faiss_multiplier, self._store.count() or 1)
@@ -95,12 +113,24 @@ class BBoxRetriever:
         if not candidates:
             return []
 
-        reranked = self._bm25_rerank(query, candidates, top_k=k)
+        # Pass 1: BM25 keyword rerank
+        bm25_ranked = self._bm25_rerank(query, candidates, top_k=k)
+
+        # Pass 2: cross-encoder rerank (optional)
+        if self._reranker is not None:
+            final = self._reranker.rerank(query, bm25_ranked, top_k=k)
+        else:
+            final = bm25_ranked
+
         logger.info(
-            "Hybrid retrieve: %d FAISS candidates -> %d after BM25 rerank (query: %.60s)",
-            len(candidates), len(reranked), query,
+            "Retrieve: %d FAISS -> %d BM25 -> %d final (reranker=%s, query: %.60s)",
+            len(candidates),
+            len(bm25_ranked),
+            len(final),
+            "on" if self._reranker else "off",
+            query,
         )
-        return reranked
+        return final
 
     def retrieve_as_sources(self, query: str, top_k: int | None = None) -> list[Source]:
         """Retrieve chunks and convert to Source objects."""
@@ -144,10 +174,9 @@ class BBoxRetriever:
         bm25 = BM25Okapi(tokenized_corpus)
         scores = bm25.get_scores(tokenized_query)
 
-        # Semantic fallback: if BM25 finds zero keyword overlap keep FAISS order
         if max(scores, default=0.0) <= 0.0:
             logger.debug(
-                "BM25 all-zero scores for query %.60s — keeping FAISS order", query
+                "BM25 all-zero scores for query %.60s \u2014 keeping FAISS order", query
             )
             return chunks[:top_k]
 

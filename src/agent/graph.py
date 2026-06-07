@@ -1,33 +1,12 @@
 """LangGraph agent definition with persistent session memory.
 
-Roadmap #5: integrates MemorySaver checkpointing with isolated
-conversation-history and retrieval-context keys.
-Roadmap #6: build_tools now receives Self-RAG config kwargs.
-
-State schema (see memory.AgentState)
--------------------------------------
-    messages           -- conversation history (append-only via add_messages)
-    retrieval_context  -- raw bbox/text snippets from tool calls (replaced)
-
-Memory isolation guarantee
----------------------------
-The LLM node only reads from ``state["messages"]``.  Retrieval context
-is stored in ``state["retrieval_context"]`` and is only injected into the
-chat window as a trimmed SystemMessage -- never as part of the raw message
-history.  This prevents bbox coordinate bleed between turns.
-
-Backward compatibility
------------------------
-If ``checkpointer=None`` (the default), the graph behaves exactly as
-before: stateless, no memory, one agent object per query.  Pass a
-MemorySaver (or SqliteSaver) to enable multi-turn memory.
-
-GPU / CPU note
---------------
-Ollama defaults to CPU-only (num_gpu=0) + cpu_avx2 backend (set in
-src/silence.py which runs first).  phi4-mini-reasoning also gets a reduced
-context window (2048 tokens) to keep RAM usage manageable on CPU.
-Set OLLAMA_NUM_GPU=-1 in .env to re-enable GPU auto-detect.
+GPU / CPU policy
+-----------------
+All models use GPU by default (num_gpu=-1 = Ollama auto-detect).
+phi4-mini-reasoning is explicitly forced to CPU-only (num_gpu=0) because
+it cannot be reliably offloaded to GPU and produces garbage output in
+hybrid mode.  OLLAMA_LLM_LIBRARY=cpu_avx2 is also set at runtime for
+the phi model only, scoped to that process.
 """
 from __future__ import annotations
 
@@ -47,15 +26,15 @@ if TYPE_CHECKING:
     from src.retrieval.retriever import BBoxRetriever
 
 # ---------------------------------------------------------------------------
-# GPU control
+# Per-model CPU-only overrides
 # ---------------------------------------------------------------------------
-# 0  = CPU-only (default, safe for all models)
-# -1 = Ollama auto-detect (use when GPU has enough VRAM)
-_OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "0"))
+# Models listed here are always run on CPU regardless of OLLAMA_NUM_GPU.
+# All other models use GPU auto-detect (-1).
+_CPU_ONLY_MODELS: frozenset[str] = frozenset({
+    "phi4-mini-reasoning:3.8b",
+})
 
-# Per-model context window overrides.
-# phi4-mini-reasoning is a reasoning model that generates verbose chain-of-
-# thought; a large num_ctx eats RAM fast on CPU, so we cap it at 2048.
+# Reduced context window for CPU-bound models to keep RAM usage manageable.
 _MODEL_NUM_CTX: dict[str, int] = {
     "phi4-mini-reasoning:3.8b": 2048,
 }
@@ -73,25 +52,6 @@ def build_agent(
     self_rag_enabled: bool = True,
     self_rag_bm25_gate: float = 0.5,
 ) -> Any:
-    """Construct and compile the LangGraph ReAct agent.
-
-    Args:
-        retriever: Hybrid FAISS+BM25 retriever.
-        provider: LLM provider (``'ollama'`` or ``'openai'``).
-        model: Model name string.
-        domain_spec: Optional domain specialist configuration.
-        graph: Optional NetworkX DiGraph for graph-based chunk expansion.
-        all_chunks: Full ordered corpus for the graph expander.
-        checkpointer: LangGraph checkpoint saver for persistent memory.
-            Pass ``None`` (default) for stateless / single-query mode.
-        self_rag_enabled: Enable the Self-RAG relevance filter. Set False
-            to disable all extra Ollama calls (useful in tests / low-RAM).
-        self_rag_bm25_gate: BM25 gate threshold; chunks above this score
-            skip the Self-RAG LLM call.
-
-    Returns:
-        Compiled LangGraph runnable.
-    """
     tools = build_tools(
         retriever,
         graph=graph,
@@ -143,26 +103,34 @@ def build_agent(
 def _build_llm(provider: str, model: str) -> Any:
     """Instantiate the LLM.
 
-    For Ollama:
-    - num_gpu=0 forces CPU-only (OLLAMA_NUM_GPU env var overrides).
-    - OLLAMA_LLM_LIBRARY=cpu_avx2 is set in silence.py before any imports.
-    - num_ctx is set per-model: phi4-mini-reasoning gets 2048 to cap RAM
-      usage; all other models get 4096 (Ollama default).
-
-    Override via .env:
-        OLLAMA_NUM_GPU=-1   # auto GPU
-        OLLAMA_NUM_GPU=0    # CPU-only (default)
+    GPU policy:
+      - Default: num_gpu=-1 (Ollama auto-detects available VRAM).
+      - phi4-mini-reasoning: num_gpu=0 + OLLAMA_LLM_LIBRARY=cpu_avx2,
+        forced regardless of any env var, because the model cannot be
+        reliably GPU-offloaded.
     """
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # noqa: PLC0415
         return ChatOpenAI(model=model, temperature=0)
 
     from langchain_ollama import ChatOllama  # noqa: PLC0415
+
+    cpu_only = model in _CPU_ONLY_MODELS
+    if cpu_only:
+        # Set library before ChatOllama is constructed so the Ollama server
+        # picks up the cpu_avx2 backend for this process.
+        os.environ["OLLAMA_LLM_LIBRARY"] = "cpu_avx2"
+        num_gpu = 0
+    else:
+        # Let Ollama decide how many layers to offload based on available VRAM.
+        os.environ.pop("OLLAMA_LLM_LIBRARY", None)
+        num_gpu = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
+
     num_ctx = _MODEL_NUM_CTX.get(model, _DEFAULT_NUM_CTX)
     return ChatOllama(
         model=model,
         temperature=0,
-        num_gpu=_OLLAMA_NUM_GPU,
+        num_gpu=num_gpu,
         num_ctx=num_ctx,
     )
 

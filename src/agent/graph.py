@@ -2,6 +2,7 @@
 
 Roadmap #5: integrates MemorySaver checkpointing with isolated
 conversation-history and retrieval-context keys.
+Roadmap #6: build_tools now receives Self-RAG config kwargs.
 
 State schema (see memory.AgentState)
 -------------------------------------
@@ -12,7 +13,7 @@ Memory isolation guarantee
 ---------------------------
 The LLM node only reads from ``state["messages"]``.  Retrieval context
 is stored in ``state["retrieval_context"]`` and is only injected into the
-chat window as a trimmed SystemMessage — never as part of the raw message
+chat window as a trimmed SystemMessage -- never as part of the raw message
 history.  This prevents bbox coordinate bleed between turns.
 
 Backward compatibility
@@ -46,6 +47,8 @@ def build_agent(
     graph: object = None,
     all_chunks: list[Chunk] | None = None,
     checkpointer: Any = None,
+    self_rag_enabled: bool = True,
+    self_rag_bm25_gate: float = 0.5,
 ) -> Any:
     """Construct and compile the LangGraph ReAct agent.
 
@@ -58,14 +61,22 @@ def build_agent(
         all_chunks: Full ordered corpus for the graph expander.
         checkpointer: LangGraph checkpoint saver for persistent memory.
             Pass ``None`` (default) for stateless / single-query mode.
-            Pass a ``MemorySaver`` or ``SqliteSaver`` for multi-turn sessions.
+        self_rag_enabled: Enable the Self-RAG relevance filter. Set False
+            to disable all extra Ollama calls (useful in tests / low-RAM).
+        self_rag_bm25_gate: BM25 gate threshold; chunks above this score
+            skip the Self-RAG LLM call.
 
     Returns:
-        Compiled LangGraph runnable.  If ``checkpointer`` is not None,
-        the runnable expects a ``config`` kwarg with a ``thread_id`` key
-        (use :func:`src.agent.memory.make_thread_config`).
+        Compiled LangGraph runnable.
     """
-    tools = build_tools(retriever, graph=graph, all_chunks=all_chunks)
+    tools = build_tools(
+        retriever,
+        graph=graph,
+        all_chunks=all_chunks,
+        self_rag_model=model,
+        self_rag_enabled=self_rag_enabled,
+        self_rag_bm25_gate=self_rag_bm25_gate,
+    )
     tool_node = ToolNode(tools)
 
     llm = _build_llm(provider, model)
@@ -74,7 +85,6 @@ def build_agent(
     system_prompt = _system_prompt(domain_spec)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
-        # Build context prefix from retrieval_context key (budget-trimmed)
         retrieval_ctx = state.get("retrieval_context", [])
         trimmed = trim_retrieval_context(retrieval_ctx)
 

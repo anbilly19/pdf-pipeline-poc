@@ -1,9 +1,23 @@
 """Chunk embedding — Ollama primary, sentence-transformers fallback.
 
-Primary:  nomic-embed-text via local Ollama daemon
-          Pull once: ollama pull nomic-embed-text
-Fallback: sentence-transformers (paraphrase-multilingual-mpnet-base-v2)
-          Fully offline, good German support, no Ollama required.
+Primary:  intfloat/multilingual-e5-small via local Ollama daemon
+          Pull once:  ollama pull multilingual-e5-small
+          Significantly better German umlaut and compound-noun retrieval
+          than the previous nomic-embed-text model.
+
+Fallback: sentence-transformers (intfloat/multilingual-e5-small, local weights)
+          Fully offline, no Ollama required.
+          Downloads model weights on first use (~120 MB).
+
+multilingual-e5 query prefix convention
+-----------------------------------------
+The e5 family expects a task prefix on every input:
+  - Chunks (passages) are indexed as-is:
+      "passage: <text>"
+  - Queries are prefixed with:
+      "query: <text>"
+Omitting these prefixes degrades retrieval quality, especially for
+short queries against long passages.
 
 Zero-vector detection: if Ollama returns a zero/constant vector
 (silent failure mode), the embedder automatically switches to the
@@ -20,9 +34,18 @@ from src.models import Chunk
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_OLLAMA_MODEL = "nomic-embed-text"
-_FALLBACK_ST_MODEL = "paraphrase-multilingual-mpnet-base-v2"
+# Roadmap #2: upgraded from nomic-embed-text to multilingual-e5-small
+_DEFAULT_OLLAMA_MODEL = "multilingual-e5-small"
+_FALLBACK_ST_MODEL = "intfloat/multilingual-e5-small"
 _ZERO_THRESHOLD = 1e-6
+
+# e5 models require task-specific prefixes for optimal retrieval quality.
+_E5_QUERY_PREFIX = "query: "
+_E5_PASSAGE_PREFIX = "passage: "
+
+# Models that require the e5 prefix convention.
+# Checked as a substring match so variants (multilingual-e5-large, etc.) are covered.
+_E5_MODEL_SUBSTRINGS = ("multilingual-e5", "e5-small", "e5-base", "e5-large", "e5-mistral")
 
 # Suppress noisy transformers __path__ alias warnings emitted during
 # sentence-transformers / transformers import (harmless, fixed upstream).
@@ -32,16 +55,25 @@ logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
 
 
+def _needs_e5_prefix(model_name: str) -> bool:
+    """Return True if this model requires the 'query:' / 'passage:' prefix convention."""
+    lower = model_name.lower()
+    return any(s in lower for s in _E5_MODEL_SUBSTRINGS)
+
+
 class ChunkEmbedder:
     """Embeds Chunk objects into dense vectors.
 
     Tries Ollama first; falls back to sentence-transformers if Ollama
     is unavailable or returns zero/constant vectors.
 
+    The e5 prefix convention (``query:`` / ``passage:``) is applied
+    automatically when a multilingual-e5 model is detected.
+
     Args:
         model: Ollama embedding model identifier.
         base_url: Ollama API base URL.
-        fallback_model: sentence-transformers model name for fallback.
+        fallback_model: sentence-transformers model name for offline fallback.
     """
 
     def __init__(
@@ -55,16 +87,26 @@ class ChunkEmbedder:
         self._fallback_model = fallback_model
         self._use_fallback = False
         self._st_model = None
+        self._apply_e5_prefix = _needs_e5_prefix(model)
+        if self._apply_e5_prefix:
+            logger.info(
+                "e5 prefix mode enabled for model '%s' — passages prefixed with 'passage:', "
+                "queries prefixed with 'query:'",
+                model,
+            )
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def embed_chunks(self, chunks: list[Chunk]) -> list[list[float]]:
-        """Embed a list of chunks into dense vectors."""
+        """Embed a list of chunks into dense vectors.
+
+        Applies the ``passage:`` prefix for e5-family models.
+        """
         if not chunks:
             return []
-        texts = [c.text for c in chunks]
+        texts = self._apply_passage_prefix([c.text for c in chunks])
         vectors = self._embed_texts(texts)
         logger.info(
             "Embedded %d chunks via %s",
@@ -74,12 +116,21 @@ class ChunkEmbedder:
         return vectors
 
     def embed_query(self, query: str) -> list[float]:
-        """Embed a single query string."""
-        return self._embed_texts([query])[0]
+        """Embed a single query string.
+
+        Applies the ``query:`` prefix for e5-family models.
+        """
+        text = f"{_E5_QUERY_PREFIX}{query}" if self._apply_e5_prefix else query
+        return self._embed_texts([text])[0]
 
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _apply_passage_prefix(self, texts: list[str]) -> list[str]:
+        if not self._apply_e5_prefix:
+            return texts
+        return [f"{_E5_PASSAGE_PREFIX}{t}" for t in texts]
 
     def _embed_texts(self, texts: list[str]) -> list[list[float]]:
         if not self._use_fallback:
@@ -111,7 +162,6 @@ class ChunkEmbedder:
         """Embed using sentence-transformers (offline, multilingual)."""
         if self._st_model is None:
             try:
-                # Import inside suppressed warning context
                 with warnings.catch_warnings():
                     warnings.filterwarnings("ignore", message=r"Accessing `__path__`")
                     warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
@@ -119,7 +169,7 @@ class ChunkEmbedder:
             except ImportError as exc:
                 raise RuntimeError(
                     "sentence-transformers is not installed. "
-                    "Run: pip install sentence-transformers\n"
+                    "Run: uv add sentence-transformers\n"
                     "Also ensure Ollama is running: ollama serve"
                 ) from exc
             logger.info("Loading sentence-transformers model: %s", self._fallback_model)
@@ -128,7 +178,12 @@ class ChunkEmbedder:
                 warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
                 self._st_model = SentenceTransformer(self._fallback_model)
             logger.info("sentence-transformers model loaded.")
-        vecs = self._st_model.encode(texts, normalize_embeddings=True, show_progress_bar=False)
+        # Note: prefixes are already applied before _st_embed is called
+        vecs = self._st_model.encode(
+            texts,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
         return vecs.tolist()
 
     @staticmethod

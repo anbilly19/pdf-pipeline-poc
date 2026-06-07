@@ -1,15 +1,4 @@
-"""Streamlit frontend for the PDF Q&A pipeline.
-
-Roadmap #7 — Modern UI
------------------------
-  - Full pipeline wiring: knowledge graph + Self-RAG filter + checkpointer
-  - Dark-mode custom CSS (Nexus-inspired token palette)
-  - Sidebar: model picker, Self-RAG gate slider, reranker toggle, session reset
-  - Chat: streaming-style typing indicator, domain badge, source pills
-  - Page viewer: highlighted bbox overlay, page navigation pills
-  - Status bar: index stats, graph node/edge count, Self-RAG keep-rate
-  - Default model: qwen2.5:3b (field-tested better than gemma4:e2b on German legal)
-"""
+"""Streamlit frontend for the PDF Q&A pipeline."""
 from __future__ import annotations
 
 import src.silence  # noqa: F401  — must be first
@@ -45,15 +34,19 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# qwen2.5:3b is the field-tested default — better German legal fact extraction
-_OLLAMA_MODELS = ["qwen2.5:3b", "qwen2.5:7b", "gemma4:e2b", "llama3.2:3b", "llama3.1:8b", "mistral:7b"]
+_OLLAMA_MODELS = [
+    "phi4-mini-reasoning:3.8b",
+    "gemma4:e2b",
+    "qwen2.5:3b",
+    "qwen2.5:7b",
+    "llama3.2:3b",
+    "llama3.1:8b",
+    "mistral:7b",
+]
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
 _MAX_SOURCE_PILLS = 5
 
-# ---------------------------------------------------------------------------
-# CSS — Nexus-inspired dark palette
-# ---------------------------------------------------------------------------
 _CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap');
@@ -190,9 +183,6 @@ hr { border-color: var(--border) !important; }
 """
 
 
-# ---------------------------------------------------------------------------
-# Session state
-# ---------------------------------------------------------------------------
 def _init_session() -> None:
     defaults: dict = {
         "messages": [],
@@ -211,9 +201,6 @@ def _init_session() -> None:
             st.session_state[k] = v
 
 
-# ---------------------------------------------------------------------------
-# Cached heavy components
-# ---------------------------------------------------------------------------
 @st.cache_resource
 def _get_shared_components() -> tuple[FAISSStore, ChunkEmbedder]:
     store = FAISSStore(persist_dir=OUTPUT_DIR / "faiss_index")
@@ -247,9 +234,6 @@ def _clear_index(store: FAISSStore) -> None:
     store._texts = []
 
 
-# ---------------------------------------------------------------------------
-# Source extraction
-# ---------------------------------------------------------------------------
 def _extract_sources(messages: list) -> list[dict]:
     sources: list[dict] = []
     seen: set[int] = set()
@@ -279,9 +263,6 @@ def _extract_sources(messages: list) -> list[dict]:
     return sources
 
 
-# ---------------------------------------------------------------------------
-# Status bar
-# ---------------------------------------------------------------------------
 def _status_bar_html(
     indexed_doc: str | None,
     stats: dict,
@@ -314,9 +295,6 @@ def _status_bar_html(
     )
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
 def main() -> None:
     st.set_page_config(
         page_title="PDF Q&A",
@@ -328,7 +306,6 @@ def main() -> None:
     _init_session()
     store, embedder = _get_shared_components()
 
-    # ── Sidebar ───────────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("## 📄 PDF Q&A")
         st.caption("Agentic document assistant · bbox citation · knowledge graph")
@@ -351,7 +328,6 @@ def main() -> None:
             self_rag_gate = st.slider(
                 "BM25 gate (skip Self-RAG above)",
                 min_value=0.0, max_value=1.0, value=0.5, step=0.05,
-                help="Chunks with BM25 score ≥ gate skip the extra Ollama call.",
             )
         else:
             self_rag_gate = 0.5
@@ -410,7 +386,6 @@ def main() -> None:
             st.session_state.self_rag_stats = {}
             st.rerun()
 
-    # ── Status bar ────────────────────────────────────────────────────────
     st.markdown(
         _status_bar_html(
             st.session_state.indexed_doc,
@@ -422,7 +397,6 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
-    # ── Layout ────────────────────────────────────────────────────────────
     chat_col, view_col = st.columns([3, 2], gap="large")
 
     with chat_col:
@@ -537,9 +511,6 @@ def main() -> None:
             c3.metric("Graph edges",  stats.get("edges",  "—"))
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 def _parse_self_rag_stats(messages: list) -> dict:
     kept = dropped = 0
     for msg in messages:

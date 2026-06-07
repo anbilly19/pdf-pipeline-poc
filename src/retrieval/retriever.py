@@ -1,11 +1,12 @@
-"""Hybrid retriever: FAISS -> BM25 -> optional cross-encoder rerank.
+"""Hybrid retriever: FAISS -> BM25 -> page-rank decay -> optional cross-encoder rerank.
 
 Pipeline:
     query
         -> FAISS top-(top_k * faiss_multiplier) candidates by cosine similarity
         -> BM25 rerank over those candidates
-        -> page-range boost: chunks from early pages (Kurzfassung) get a
-           score multiplier when the query contains contract-specific keywords
+        -> page-rank decay: score *= 1 / log2(page + 1)
+           Generic boost — earlier pages always rank higher for equal BM25 scores.
+           Works across all PDF types (contracts, policies, forms, reports).
         -> OllamaReranker cross-encoder pass (if reranker is configured)
         -> top_k returned to LLM
 
@@ -13,17 +14,17 @@ BM25 fixes the core problem where nomic-embed-text ranks German legal
 keywords poorly: BM25 is exact-term based and always surfaces chunks
 that literally contain the query words.
 
-Kurzfassung boost (field-test fix)
-------------------------------------
-The short contract form (pages 1-2) contains contract-specific clauses
-(Verlängerungsoption, Verschwiegenheit, Leistungsumfang) that get buried
-by the much longer AGB section. When the query contains any of a set of
-Kurzfassung-specific keywords, chunks from pages 1-2 receive a 1.5x BM25
-score multiplier before the final ranking.
+Page-rank decay (Option A)
+---------------------------
+Early pages of any PDF are almost always the most document-specific:
+contracts -> Kurzfassung, insurance -> coverage summary, tax -> header.
+Applying a smooth log decay rewards early pages without hard-coding
+any domain keywords.
 """
 from __future__ import annotations
 
 import logging
+import math
 import re
 from typing import TYPE_CHECKING
 
@@ -37,17 +38,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _FAISS_MULTIPLIER = 4
-
-# Keywords that signal the query is about contract-specific (Kurzfassung) content.
-# When any of these appear in the query, pages 1-2 get a score boost.
-_KURZFASSUNG_KEYWORDS = {
-    "verlängerungsoption", "verlängerung", "verschwiegenheit", "vertragsnummer",
-    "leistungsumfang", "honorarvereinbarung", "mitteilungsblatt", "seminarbeginn",
-    "bundesakademie", "absage", "teilnehmerzahl", "sonderveranstaltung",
-    "reisekosten", "reisezeiten", "zuschlagserteilung",
-}
-_KURZFASSUNG_MAX_PAGE = 2   # pages 1-2 are the Kurzfassung
-_KURZFASSUNG_BOOST = 1.5    # score multiplier for Kurzfassung chunks
+_PAGE_DECAY_WEIGHT = 0.25  # blend: final = (1 - w) * bm25_norm + w * page_boost
 
 
 def _tokenize(text: str) -> list[str]:
@@ -55,14 +46,22 @@ def _tokenize(text: str) -> list[str]:
     return re.findall(r"[\w\u00c0-\u024f\u00df]+", text.lower())
 
 
-def _is_kurzfassung_query(query: str) -> bool:
-    """Return True if the query contains any Kurzfassung-specific keywords."""
-    tokens = set(_tokenize(query))
-    return bool(tokens & _KURZFASSUNG_KEYWORDS)
+def _page_boost(page_number: int) -> float:
+    """Return a 0..1 score boost that decays with page number.
+
+    Uses 1 / log2(page + 1) so:
+      page 1  -> 1.000
+      page 2  -> 0.631
+      page 3  -> 0.500
+      page 5  -> 0.387
+      page 10 -> 0.289
+      page 20 -> 0.231
+    """
+    return 1.0 / math.log2(max(page_number, 1) + 1)
 
 
 class BBoxRetriever:
-    """Hybrid FAISS+BM25+reranker retriever preserving full bbox metadata.
+    """Hybrid FAISS+BM25+page-decay+reranker retriever preserving full bbox metadata.
 
     Args:
         store: Initialised FAISSStore.
@@ -95,7 +94,7 @@ class BBoxRetriever:
     ) -> list[Chunk]:
         """Retrieve the most relevant chunks using hybrid search.
 
-        Pipeline: FAISS candidates -> BM25 rerank -> Kurzfassung boost
+        Pipeline: FAISS candidates -> BM25 rerank -> page-rank decay blend
         -> optional cross-encoder rerank.
 
         Args:
@@ -121,23 +120,17 @@ class BBoxRetriever:
         if not candidates:
             return []
 
-        # Pass 1: BM25 keyword rerank with optional Kurzfassung boost
-        boost_kurzfassung = _is_kurzfassung_query(query)
-        bm25_ranked = self._bm25_rerank(
-            query, candidates, top_k=k, boost_kurzfassung=boost_kurzfassung
-        )
+        bm25_ranked = self._bm25_rerank(query, candidates, top_k=k)
 
-        # Pass 2: cross-encoder rerank (optional)
         if self._reranker is not None:
             final = self._reranker.rerank(query, bm25_ranked, top_k=k)
         else:
             final = bm25_ranked
 
         logger.info(
-            "Retrieve: %d FAISS -> %d BM25%s -> %d final (reranker=%s, query: %.60s)",
+            "Retrieve: %d FAISS -> %d BM25+decay -> %d final (reranker=%s, query: %.60s)",
             len(candidates),
             len(bm25_ranked),
-            " +Kurzfassung boost" if boost_kurzfassung else "",
             len(final),
             "on" if self._reranker else "off",
             query,
@@ -158,24 +151,20 @@ class BBoxRetriever:
         ]
 
     @staticmethod
-    def _bm25_rerank(
-        query: str,
-        chunks: list[Chunk],
-        top_k: int,
-        boost_kurzfassung: bool = False,
-    ) -> list[Chunk]:
-        """Rerank chunks using BM25 keyword scoring.
+    def _bm25_rerank(query: str, chunks: list[Chunk], top_k: int) -> list[Chunk]:
+        """Rerank chunks using BM25 + page-rank decay blend.
 
-        Falls back to original FAISS order if:
-        - rank_bm25 is not installed, OR
-        - all BM25 scores are zero (no keyword overlap).
+        Scoring:
+            bm25_norm  = bm25_score / max_bm25_score   (0..1)
+            page_score = 1 / log2(page + 1)            (0..1, decays with page)
+            final      = (1 - w) * bm25_norm + w * page_score
+
+        Falls back to FAISS order when BM25 yields no keyword overlap.
 
         Args:
             query: The search query.
             chunks: Candidate chunks from FAISS.
             top_k: Number of chunks to return.
-            boost_kurzfassung: If True, multiply scores for pages 1-2 by
-                _KURZFASSUNG_BOOST to surface contract-specific clauses.
 
         Returns:
             Reranked list of up to top_k chunks.
@@ -190,21 +179,24 @@ class BBoxRetriever:
         tokenized_query = _tokenize(query)
 
         bm25 = BM25Okapi(tokenized_corpus)
-        scores = list(bm25.get_scores(tokenized_query))
+        raw_scores = list(bm25.get_scores(tokenized_query))
 
-        if max(scores, default=0.0) <= 0.0:
+        max_score = max(raw_scores, default=0.0)
+        if max_score <= 0.0:
             logger.debug("BM25 all-zero for query %.60s — keeping FAISS order", query)
             return chunks[:top_k]
 
-        # Apply Kurzfassung page boost
-        if boost_kurzfassung:
-            for i, chunk in enumerate(chunks):
-                if chunk.page_number <= _KURZFASSUNG_MAX_PAGE:
-                    scores[i] *= _KURZFASSUNG_BOOST
-                    logger.debug(
-                        "Kurzfassung boost applied to page %d (score %.3f)",
-                        chunk.page_number, scores[i],
-                    )
+        w = _PAGE_DECAY_WEIGHT
+        blended: list[tuple[float, Chunk]] = []
+        for score, chunk in zip(raw_scores, chunks):
+            bm25_norm  = score / max_score
+            page_score = _page_boost(chunk.page_number)
+            final      = (1 - w) * bm25_norm + w * page_score
+            blended.append((final, chunk))
+            logger.debug(
+                "page=%d bm25_norm=%.3f page_boost=%.3f final=%.3f",
+                chunk.page_number, bm25_norm, page_score, final,
+            )
 
-        ranked = sorted(zip(scores, chunks), key=lambda x: x[0], reverse=True)
+        ranked = sorted(blended, key=lambda x: x[0], reverse=True)
         return [c for _, c in ranked[:top_k]]

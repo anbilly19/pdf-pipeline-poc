@@ -34,13 +34,16 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+# Models ordered by tool-calling reliability (benchmarks 2025-2026).
+# qwen3 and qwen2.5 lead all open-source models for structured tool calling.
+# llama3.2:3b removed — unreliable tool discipline, hallucinates errors.
 _OLLAMA_MODELS = [
-    "gemma4:e2b",
-    "llama3.2:3b",
-    "qwen2.5:3b",
-    "qwen2.5:7b",
-    "llama3.1:8b",
-    "mistral:7b",
+    "gemma4:e2b",       # best all-round; strong tool calling + German
+    "qwen3:8b",         # #1 tool-calling benchmark (Docker/Morph 2026)
+    "qwen2.5:7b",       # reliable tool calling, good speed/quality balance
+    "qwen2.5:3b",       # lightweight fallback
+    "llama3.1:8b",      # solid tool calling, widely tested
+    "mistral:7b",       # decent tool calling
 ]
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15

@@ -35,11 +35,10 @@ DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 _OLLAMA_MODELS = [
-    "phi4-mini-reasoning:3.8b",
     "gemma4:e2b",
+    "llama3.2:3b",
     "qwen2.5:3b",
     "qwen2.5:7b",
-    "llama3.2:3b",
     "llama3.1:8b",
     "mistral:7b",
 ]
@@ -121,7 +120,6 @@ html, body, [class*="css"] { font-family: var(--font) !important; }
 [data-testid="stMetricValue"] { color: var(--primary) !important; font-weight: 600 !important; }
 [data-testid="stMetricLabel"] { color: var(--text-muted) !important; font-size: .75rem !important; }
 
-[data-testid="stSelectbox"] > div,
 [data-baseweb="select"] > div {
   background: var(--surface-2) !important;
   border-color: var(--border) !important;

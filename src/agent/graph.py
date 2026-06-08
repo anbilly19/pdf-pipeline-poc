@@ -3,10 +3,8 @@
 GPU / CPU policy
 -----------------
 All models use GPU by default (num_gpu=-1 = Ollama auto-detect).
-phi4-mini-reasoning is explicitly forced to CPU-only (num_gpu=0) because
-it cannot be reliably offloaded to GPU and produces garbage output in
-hybrid mode.  OLLAMA_LLM_LIBRARY=cpu_avx2 is also set at runtime for
-the phi model only, scoped to that process.
+No per-model CPU overrides are needed now that phi4-mini-reasoning
+has been removed (it does not support the tools API).
 """
 from __future__ import annotations
 
@@ -25,19 +23,9 @@ if TYPE_CHECKING:
     from src.agent.domain_config import DomainSpec
     from src.retrieval.retriever import BBoxRetriever
 
-# ---------------------------------------------------------------------------
-# Per-model CPU-only overrides
-# ---------------------------------------------------------------------------
-# Models listed here are always run on CPU regardless of OLLAMA_NUM_GPU.
-# All other models use GPU auto-detect (-1).
-_CPU_ONLY_MODELS: frozenset[str] = frozenset({
-    "phi4-mini-reasoning:3.8b",
-})
-
-# Reduced context window for CPU-bound models to keep RAM usage manageable.
-_MODEL_NUM_CTX: dict[str, int] = {
-    "phi4-mini-reasoning:3.8b": 2048,
-}
+# GPU layers: -1 = Ollama auto-detect (use all VRAM available).
+# Override via OLLAMA_NUM_GPU in .env (e.g. 0 for CPU-only).
+_OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 4096
 
 
@@ -101,37 +89,16 @@ def build_agent(
 
 
 def _build_llm(provider: str, model: str) -> Any:
-    """Instantiate the LLM.
-
-    GPU policy:
-      - Default: num_gpu=-1 (Ollama auto-detects available VRAM).
-      - phi4-mini-reasoning: num_gpu=0 + OLLAMA_LLM_LIBRARY=cpu_avx2,
-        forced regardless of any env var, because the model cannot be
-        reliably GPU-offloaded.
-    """
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # noqa: PLC0415
         return ChatOpenAI(model=model, temperature=0)
 
     from langchain_ollama import ChatOllama  # noqa: PLC0415
-
-    cpu_only = model in _CPU_ONLY_MODELS
-    if cpu_only:
-        # Set library before ChatOllama is constructed so the Ollama server
-        # picks up the cpu_avx2 backend for this process.
-        os.environ["OLLAMA_LLM_LIBRARY"] = "cpu_avx2"
-        num_gpu = 0
-    else:
-        # Let Ollama decide how many layers to offload based on available VRAM.
-        os.environ.pop("OLLAMA_LLM_LIBRARY", None)
-        num_gpu = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
-
-    num_ctx = _MODEL_NUM_CTX.get(model, _DEFAULT_NUM_CTX)
     return ChatOllama(
         model=model,
         temperature=0,
-        num_gpu=num_gpu,
-        num_ctx=num_ctx,
+        num_gpu=_OLLAMA_NUM_GPU,
+        num_ctx=_DEFAULT_NUM_CTX,
     )
 
 

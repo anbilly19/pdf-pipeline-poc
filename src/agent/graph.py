@@ -2,31 +2,16 @@
 
 Answer generation strategy
 ---------------------------
-qwen3:4b ignores system prompt instructions when it has tool-call freedom
-and defaults to its RLHF assistant persona (summaries, help offers, etc.).
+qwen3:4b ignores system prompt instructions and writes summaries.
 
-Fix: after retrieval is done, we do NOT ask the agent to freely generate
-an answer. Instead we call the LLM once with a hardcoded fill-in-the-blank
-template that leaves no room for deviation:
+Fix: two-phase call_model:
+  Phase 1 (no tool results yet): agent calls search_term
+  Phase 2 (tool results in history): extract text from ToolMessages,
+           build fill-in-the-blank template, call llm_plain once.
+           Model completes "Antwort:" inline — cannot start a summary.
 
-    Dokumentauszüge:
-    [chunks]
-
-    Frage: <question>
-    Antwort (max. 2 Sätze, nur aus obigem Text):
-
-The model is forced to complete the sentence after "Antwort:" — it cannot
-start a new paragraph, offer help, or write a summary.
-
-The agent graph still handles multi-hop tool calls (search_term can be
-called up to MAX_TOOL_ITERATIONS times). Only the FINAL answer step is
-replaced by the template.
-
-Qwen3 sampling parameters
---------------------------
-  temperature = 0.7, top_p = 0.8, top_k = 20  (Unsloth/Qwen official)
-
-Thinking disabled via /nothink appended to last HumanMessage.
+Qwen3 params: temperature=0.7, top_p=0.8, top_k=20 (Unsloth/Qwen docs)
+Thinking disabled via /nothink on last HumanMessage.
 """
 from __future__ import annotations
 
@@ -34,7 +19,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
+from langchain_core.messages import SystemMessage, AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -66,8 +51,15 @@ def _count_tool_calls(messages: list) -> int:
     )
 
 
+def _get_tool_outputs(messages: list) -> list[str]:
+    """Extract content strings from all ToolMessages in history."""
+    return [
+        m.content for m in messages
+        if isinstance(m, ToolMessage) and m.content
+    ]
+
+
 def _append_nothink(messages: list) -> list:
-    """Append /nothink to the last HumanMessage so Ollama skips the think block."""
     result = list(messages)
     for i in range(len(result) - 1, -1, -1):
         if isinstance(result[i], HumanMessage):
@@ -79,7 +71,6 @@ def _append_nothink(messages: list) -> list:
 
 
 def _get_last_human_question(messages: list) -> str | None:
-    """Return the text of the most recent HumanMessage (without /nothink tag)."""
     for m in reversed(messages):
         if isinstance(m, HumanMessage):
             return m.content.replace(" /nothink", "").strip()
@@ -87,11 +78,7 @@ def _get_last_human_question(messages: list) -> str | None:
 
 
 def _build_answer_prompt(question: str, ctx_text: str) -> str:
-    """Build the fill-in-the-blank prompt used for final answer generation.
-
-    The prompt ends with 'Antwort:' on its own line so the model is forced
-    to complete it inline — no room to start a new topic or summary.
-    """
+    """Fill-in-the-blank prompt — model must complete 'Antwort:' inline."""
     return (
         f"Dokumentausz\u00fcge:\n{ctx_text}\n\n"
         f"Frage: {question}\n"
@@ -121,40 +108,38 @@ def build_agent(
         self_rag_bm25_gate=self_rag_bm25_gate,
     )
     tool_node = ToolNode(tools)
-
-    llm = _build_llm(provider, model, num_ctx=num_ctx)
-    llm_with_tools = llm.bind_tools(tools)
-    # Plain LLM (no tools) used for the final answer template call.
+    llm_with_tools = _build_llm(provider, model, num_ctx=num_ctx).bind_tools(tools)
     llm_plain = _build_llm(provider, model, num_ctx=num_ctx)
     no_think = _is_thinking_model(model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
-        retrieval_ctx = state.get("retrieval_context", [])
-        trimmed = trim_retrieval_context(retrieval_ctx)
-        already_called_tools = _count_tool_calls(state["messages"]) > 0
+        messages = state["messages"]
+        tool_outputs = _get_tool_outputs(messages)
 
-        # --- Final answer phase: chunks available, no more tool calls needed ---
-        if trimmed and already_called_tools:
-            question = _get_last_human_question(state["messages"]) or ""
+        # --- Final answer phase: tool results exist in history ---
+        if tool_outputs:
+            question = _get_last_human_question(messages) or ""
+            # Trim to context budget
+            trimmed = trim_retrieval_context(tool_outputs)
             ctx_text = "\n\n".join(trimmed)
             prompt = _build_answer_prompt(question, ctx_text)
-            # Single HumanMessage ending with 'Antwort:' — model completes inline
             msg = HumanMessage(content=prompt + (" /nothink" if no_think else ""))
+            logger.info("Final-answer phase: %d tool outputs, question=%.60s", len(trimmed), question)
             response = llm_plain.invoke([msg])
             return {"messages": [response]}
 
-        # --- Tool-call phase: let agent decide which tools to call ---
+        # --- Tool-call phase: no tool results yet, call search_term ---
         system_prompt = (
             "Du bist ein Vertragsanalyst. "
             "Rufe search_term auf, um relevante Abschnitte zu finden. "
             "Formuliere KEINE Antwort selbst — das passiert nach dem Tool-Aufruf automatisch."
         )
-        messages: list = [SystemMessage(content=system_prompt)]
-        history = list(state["messages"])
+        call_messages: list = [SystemMessage(content=system_prompt)]
+        history = list(messages)
         if no_think:
             history = _append_nothink(history)
-        messages += history
-        return {"messages": [llm_with_tools.invoke(messages)]}
+        call_messages += history
+        return {"messages": [llm_with_tools.invoke(call_messages)]}
 
     def should_continue(state: AgentState) -> str:
         last = state["messages"][-1]

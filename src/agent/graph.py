@@ -29,7 +29,7 @@ _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 
 # Default context window kept low to stay within 5 GB free RAM on this machine.
 # Raise to 4096 only if a model fits comfortably (check `free -h` first).
-_DEFAULT_NUM_CTX: int = 2048
+_DEFAULT_NUM_CTX: int = 512
 
 
 def build_agent(

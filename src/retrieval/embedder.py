@@ -1,7 +1,7 @@
 """Chunk embedding — Ollama primary, sentence-transformers fallback.
 
 Primary:  intfloat/multilingual-e5-small via local Ollama daemon
-          Pull once:  ollama pull multilingual-e5-small
+          Pull once:  ollama pull qllama/multilingual-e5-small
           Significantly better German umlaut and compound-noun retrieval
           than the previous nomic-embed-text model.
 
@@ -34,8 +34,8 @@ from src.models import Chunk
 
 logger = logging.getLogger(__name__)
 
-# Use the :latest tag to match what Ollama registers after `ollama pull multilingual-e5-small`
-_DEFAULT_OLLAMA_MODEL = "multilingual-e5-small:latest"
+# Full registered name as shown by `ollama list`
+_DEFAULT_OLLAMA_MODEL = "qllama/multilingual-e5-small:latest"
 _FALLBACK_ST_MODEL = "intfloat/multilingual-e5-small"
 _ZERO_THRESHOLD = 1e-6
 
@@ -44,11 +44,8 @@ _E5_QUERY_PREFIX = "query: "
 _E5_PASSAGE_PREFIX = "passage: "
 
 # Models that require the e5 prefix convention.
-# Checked as a substring match so variants (multilingual-e5-large, etc.) are covered.
 _E5_MODEL_SUBSTRINGS = ("multilingual-e5", "e5-small", "e5-base", "e5-large", "e5-mistral")
 
-# Suppress noisy transformers __path__ alias warnings emitted during
-# sentence-transformers / transformers import (harmless, fixed upstream).
 warnings.filterwarnings("ignore", message=r"Accessing `__path__`", module="transformers")
 warnings.filterwarnings("ignore", message=r"Accessing `__path__`")
 logging.getLogger("transformers").setLevel(logging.ERROR)
@@ -66,9 +63,6 @@ class ChunkEmbedder:
 
     Tries Ollama first; falls back to sentence-transformers if Ollama
     is unavailable or returns zero/constant vectors.
-
-    The e5 prefix convention (``query:`` / ``passage:``) is applied
-    automatically when a multilingual-e5 model is detected.
 
     Args:
         model: Ollama embedding model identifier.
@@ -95,15 +89,8 @@ class ChunkEmbedder:
                 model,
             )
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-
     def embed_chunks(self, chunks: list[Chunk]) -> list[list[float]]:
-        """Embed a list of chunks into dense vectors.
-
-        Applies the ``passage:`` prefix for e5-family models.
-        """
+        """Embed a list of chunks into dense vectors."""
         if not chunks:
             return []
         texts = self._apply_passage_prefix([c.text for c in chunks])
@@ -116,16 +103,9 @@ class ChunkEmbedder:
         return vectors
 
     def embed_query(self, query: str) -> list[float]:
-        """Embed a single query string.
-
-        Applies the ``query:`` prefix for e5-family models.
-        """
+        """Embed a single query string."""
         text = f"{_E5_QUERY_PREFIX}{query}" if self._apply_e5_prefix else query
         return self._embed_texts([text])[0]
-
-    # ------------------------------------------------------------------
-    # Internal
-    # ------------------------------------------------------------------
 
     def _apply_passage_prefix(self, texts: list[str]) -> list[str]:
         if not self._apply_e5_prefix:

@@ -1,12 +1,32 @@
 """LangGraph agent definition with persistent session memory.
 
+Answer generation strategy
+---------------------------
+qwen3:4b ignores system prompt instructions when it has tool-call freedom
+and defaults to its RLHF assistant persona (summaries, help offers, etc.).
+
+Fix: after retrieval is done, we do NOT ask the agent to freely generate
+an answer. Instead we call the LLM once with a hardcoded fill-in-the-blank
+template that leaves no room for deviation:
+
+    Dokumentauszüge:
+    [chunks]
+
+    Frage: <question>
+    Antwort (max. 2 Sätze, nur aus obigem Text):
+
+The model is forced to complete the sentence after "Antwort:" — it cannot
+start a new paragraph, offer help, or write a summary.
+
+The agent graph still handles multi-hop tool calls (search_term can be
+called up to MAX_TOOL_ITERATIONS times). Only the FINAL answer step is
+replaced by the template.
+
 Qwen3 sampling parameters
 --------------------------
   temperature = 0.7, top_p = 0.8, top_k = 20  (Unsloth/Qwen official)
 
 Thinking disabled via /nothink appended to last HumanMessage.
-
-Loop guard: MAX_TOOL_ITERATIONS = 4
 """
 from __future__ import annotations
 
@@ -66,6 +86,20 @@ def _get_last_human_question(messages: list) -> str | None:
     return None
 
 
+def _build_answer_prompt(question: str, ctx_text: str) -> str:
+    """Build the fill-in-the-blank prompt used for final answer generation.
+
+    The prompt ends with 'Antwort:' on its own line so the model is forced
+    to complete it inline — no room to start a new topic or summary.
+    """
+    return (
+        f"Dokumentausz\u00fcge:\n{ctx_text}\n\n"
+        f"Frage: {question}\n"
+        f"Antwort (maximal 2 S\u00e4tze, ausschlie\u00dflich aus den obigen Ausz\u00fcgen, "
+        f"Zahlen und Begriffe w\u00f6rtlich zitieren):"
+    )
+
+
 def build_agent(
     retriever: BBoxRetriever,
     provider: str = "ollama",
@@ -90,29 +124,32 @@ def build_agent(
 
     llm = _build_llm(provider, model, num_ctx=num_ctx)
     llm_with_tools = llm.bind_tools(tools)
-    system_prompt = _system_prompt(domain_spec)
+    # Plain LLM (no tools) used for the final answer template call.
+    llm_plain = _build_llm(provider, model, num_ctx=num_ctx)
     no_think = _is_thinking_model(model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
         retrieval_ctx = state.get("retrieval_context", [])
         trimmed = trim_retrieval_context(retrieval_ctx)
+        already_called_tools = _count_tool_calls(state["messages"]) > 0
 
-        messages: list = [SystemMessage(content=system_prompt)]
-
-        if trimmed:
+        # --- Final answer phase: chunks available, no more tool calls needed ---
+        if trimmed and already_called_tools:
             question = _get_last_human_question(state["messages"]) or ""
             ctx_text = "\n\n".join(trimmed)
-            messages.append(
-                SystemMessage(
-                    content=(
-                        f"Beantworte NUR diese Frage: {question}\n\n"
-                        f"Relevante Dokumentausz\u00fcge:\n\n{ctx_text}\n\n"
-                        f"Antworte in 1-3 S\u00e4tzen. "
-                        f"Zitiere Zahlen, Zeitangaben und Begriffe w\u00f6rtlich aus dem Text."
-                    )
-                )
-            )
+            prompt = _build_answer_prompt(question, ctx_text)
+            # Single HumanMessage ending with 'Antwort:' — model completes inline
+            msg = HumanMessage(content=prompt + (" /nothink" if no_think else ""))
+            response = llm_plain.invoke([msg])
+            return {"messages": [response]}
 
+        # --- Tool-call phase: let agent decide which tools to call ---
+        system_prompt = (
+            "Du bist ein Vertragsanalyst. "
+            "Rufe search_term auf, um relevante Abschnitte zu finden. "
+            "Formuliere KEINE Antwort selbst — das passiert nach dem Tool-Aufruf automatisch."
+        )
+        messages: list = [SystemMessage(content=system_prompt)]
         history = list(state["messages"])
         if no_think:
             history = _append_nothink(history)
@@ -159,24 +196,3 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
         num_gpu=_OLLAMA_NUM_GPU,
         num_ctx=num_ctx,
     )
-
-
-def _system_prompt(domain_spec: DomainSpec | None) -> str:
-    base = (
-        "Du bist ein spezialisierter Vertragsanalyst. "
-        "Beantworte AUSSCHLIESSLICH die gestellte Frage zum vorliegenden Vertragsdokument.\n\n"
-        "VERBOTENE Antwortmuster:\n"
-        "- Angebote wie 'Was m\u00f6chten Sie tun?' oder 'Ich kann helfen mit...' \u2192 VERBOTEN\n"
-        "- Zusammenfassungen von Abschnitten ohne Bezug zur Frage \u2192 VERBOTEN\n"
-        "- Antworten ohne vorherigen search_term-Aufruf \u2192 VERBOTEN\n\n"
-        "ABLAUF:\n"
-        "1. search_term aufrufen (max. 2x)\n"
-        "2. NUR die gestellte Frage beantworten \u2014 in 1-3 S\u00e4tzen\n"
-        "3. Zahlen, Zeitangaben und Begriffe w\u00f6rtlich aus dem Dokument zitieren\n"
-        "4. Fehlende Info: 'Diese Information ist im Dokument nicht enthalten.'\n"
-        "5. Leeres Formularfeld: 'Das Feld ist im Dokument nicht ausgef\u00fcllt.'\n"
-        "6. Fertig. Keine R\u00fcckfragen, keine Hilfsangebote."
-    )
-    if domain_spec and domain_spec.system_prompt:
-        return f"{base}\n\n{domain_spec.system_prompt}"
-    return base

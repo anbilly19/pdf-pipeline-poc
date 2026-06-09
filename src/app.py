@@ -35,13 +35,17 @@ DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # Models currently installed on this machine.
-# Ordered by expected usefulness for local German contract QA and tool calling.
+# qwen3.5:4b  — 3.4 GB, primary default, strong tool calling + German
+# qwen3.5:2b  — 2.7 GB, lightweight fallback, fits easily in 5 GB free RAM
+# gemma4:e4b  — 9.6 GB, use ctx=1024 only or expect OOM
+# gemma4:e2b  — 7.2 GB, same caveat
 _OLLAMA_MODELS = [
-    "qwen3:4b",     # primary default
-    "gemma4:e2b",   # smaller/faster Gemma option
-    "qwen2.5:3b",   # lightweight fallback
-    "gemma4:e4b",   # larger Gemma option
+    "qwen3.5:4b",   # primary default
+    "qwen3.5:2b",   # lightweight fallback
+    "gemma4:e4b",   # large — use ctx=1024 only
+    "gemma4:e2b",   # large — use ctx=1024 only
 ]
+_LARGE_MODELS = {"gemma4:e4b", "gemma4:e2b"}
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
 _MAX_SOURCE_PILLS = 5
@@ -320,6 +324,8 @@ def main() -> None:
         )
         if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
             st.warning("OPENAI_API_KEY not set in .env")
+        if provider == "ollama" and model in _LARGE_MODELS:
+            st.warning("⚠️ Large model (7–10 GB). Set ctx=1024 to avoid OOM.")
 
         st.divider()
         enable_reranker = st.toggle("Cross-encoder reranker", value=True)
@@ -336,7 +342,7 @@ def main() -> None:
             "Context window (tokens)",
             options=_CTX_OPTIONS,
             value=_DEFAULT_CTX,
-            help="Lower = less RAM. 2048 recommended for 5 GB free RAM.",
+            help="Lower = less RAM. 2048 for qwen3.5 models, 1024 for Gemma4.",
         )
 
         st.divider()

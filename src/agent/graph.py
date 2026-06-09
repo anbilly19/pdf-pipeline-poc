@@ -1,28 +1,20 @@
-"""LangGraph agent definition with persistent session memory.
+"""LangGraph agent — two-phase call_model.
 
-Answer generation strategy
----------------------------
-qwen3:4b ignores system prompt instructions and writes summaries.
+Phase 1 (no ToolMessage yet): agent calls search_term.
+Phase 2 (ToolMessage in history): extract chunks, build fill-in-the-blank
+        prompt, call llm_plain once with hard context limit.
+        Model completes 'Antwort:' inline.
 
-Fix: two-phase call_model:
-  Phase 1 (no tool results yet): agent calls search_term
-  Phase 2 (tool results in history): extract text from ToolMessages,
-           build fill-in-the-blank template, call llm_plain once.
-           Model completes "Antwort:" inline — cannot start a summary.
-
-Video learnings applied (Clean Build Studio, Jun 2026)
--------------------------------------------------------
-- format="json" on the final-answer LLM call forces machine-readable output
-  at API level, not just prompt level — dropped latency 87s→27s in the video.
-- num_predict=150 caps output tokens; 2-sentence contract answer never needs
-  more. Without a cap, small models ramble even with a strict prompt.
-- num_ctx set explicitly: too low and the model loses its instructions,
-  echoes input, or repeats text (different failure from num_predict cutoff).
-- Chunk metadata (bboxes, image_path) stripped before the final prompt so the
-  model does not waste tokens on noise — see _strip_chunk_metadata().
-
-Qwen3 params: temperature=0.7, top_p=0.8, top_k=20 (Unsloth/Qwen docs)
-Thinking disabled via /nothink on last HumanMessage.
+Key fixes (Jun 2026)
+--------------------
+- Tool output arrives as ONE giant string per ToolMessage (all 23 chunks
+  concatenated). trim_retrieval_context received a list of 1 item that
+  exceeded 4500 chars and returned [] — causing empty Dokumentauszüge.
+  Fix: split on '--- Abschnitt' boundaries before trimming.
+- num_predict=150 caused done_reason='length' and content='' on the
+  final answer call. Raised to 300.
+- _strip_chunk_metadata now also strips the 'GEFUNDENE ABSCHNITTE' header
+  and '--- Abschnitt N ---' section dividers.
 """
 from __future__ import annotations
 
@@ -48,17 +40,17 @@ logger = logging.getLogger(__name__)
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
-
-# num_predict: max output tokens for the final answer.
-# 150 tokens ~ 2 sentences in German. Without a cap, small models ramble.
-_ANSWER_NUM_PREDICT: int = 150
+_ANSWER_NUM_PREDICT: int = 300  # 150 caused done_reason='length', content=''
 
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 
-# Regex patterns for metadata lines injected by ToolResult.__str__
-_METADATA_PATTERNS = re.compile(
+_METADATA_RE = re.compile(
     r"\[source:.*?\]|bboxes=\[.*?\]|image_path=.*?(?=\n|$)",
     re.DOTALL,
+)
+_SECTION_HEADER_RE = re.compile(
+    r"^GEFUNDENE ABSCHNITTE.*$|^--- Abschnitt \d+ ---$",
+    re.MULTILINE,
 )
 
 
@@ -73,23 +65,31 @@ def _count_tool_calls(messages: list) -> int:
     )
 
 
+def _split_tool_output(raw: str) -> list[str]:
+    """Split one big tool output string into individual chunk strings.
+
+    search_term returns all chunks as a single string separated by
+    '--- Abschnitt N ---' headers. trim_retrieval_context needs a list
+    of individual snippets, not one giant blob.
+    """
+    parts = re.split(r"--- Abschnitt \d+ ---", raw)
+    return [p.strip() for p in parts if p.strip() and not p.strip().startswith("GEFUNDENE")]
+
+
 def _get_tool_outputs(messages: list) -> list[str]:
-    """Extract content strings from all ToolMessages in history."""
-    return [
-        m.content for m in messages
-        if isinstance(m, ToolMessage) and m.content
-    ]
+    """Extract and split all ToolMessage contents into individual chunks."""
+    chunks: list[str] = []
+    for m in messages:
+        if isinstance(m, ToolMessage) and m.content:
+            content = m.content if isinstance(m.content, str) else str(m.content)
+            chunks.extend(_split_tool_output(content))
+    return chunks
 
 
 def _strip_chunk_metadata(text: str) -> str:
-    """Remove bbox / image_path / source metadata lines from chunk text.
-
-    ToolResult.__str__ appends '[source: page X, bboxes=[...], image_path=...]'
-    to every chunk. This noise wastes num_ctx and can confuse the model.
-    Python owns that data — the LLM never needs to read it.
-    """
-    cleaned = _METADATA_PATTERNS.sub("", text)
-    # Collapse runs of blank lines left by the removal
+    """Strip source/bbox/image_path metadata lines from a chunk."""
+    cleaned = _METADATA_RE.sub("", text)
+    cleaned = _SECTION_HEADER_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
     return cleaned.strip()
 
@@ -113,7 +113,6 @@ def _get_last_human_question(messages: list) -> str | None:
 
 
 def _build_answer_prompt(question: str, ctx_text: str) -> str:
-    """Fill-in-the-blank prompt — model must complete 'Antwort:' inline."""
     return (
         f"Dokumentausz\u00fcge:\n{ctx_text}\n\n"
         f"Frage: {question}\n"
@@ -144,24 +143,21 @@ def build_agent(
     )
     tool_node = ToolNode(tools)
     llm_with_tools = _build_llm(provider, model, num_ctx=num_ctx).bind_tools(tools)
-    # Plain LLM for final answer: format="json" enforced at API level,
-    # num_predict capped so the model cannot ramble.
-    llm_plain = _build_llm(
-        provider, model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT
-    )
+    llm_plain = _build_llm(provider, model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
     no_think = _is_thinking_model(model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
         messages = state["messages"]
         tool_outputs = _get_tool_outputs(messages)
 
-        # --- Final answer phase: tool results exist in history ---
         if tool_outputs:
             question = _get_last_human_question(messages) or ""
             trimmed = trim_retrieval_context(tool_outputs)
-            # Strip metadata noise before the LLM sees the chunks
+            if not trimmed:
+                # Budget too tight — just take the first 3 chunks raw
+                trimmed = tool_outputs[:3]
             clean_chunks = [_strip_chunk_metadata(t) for t in trimmed]
-            ctx_text = "\n\n".join(clean_chunks)
+            ctx_text = "\n\n".join(c for c in clean_chunks if c)
             prompt = _build_answer_prompt(question, ctx_text)
             msg = HumanMessage(content=prompt + (" /nothink" if no_think else ""))
             logger.info(
@@ -171,7 +167,6 @@ def build_agent(
             response = llm_plain.invoke([msg])
             return {"messages": [response]}
 
-        # --- Tool-call phase: no tool results yet ---
         system_prompt = (
             "Du bist ein Vertragsanalyst. "
             "Rufe search_term auf, um relevante Abschnitte zu finden. "
@@ -222,11 +217,6 @@ def _build_llm(
         base_kwargs["num_predict"] = num_predict
 
     if _is_thinking_model(model):
-        return ChatOllama(
-            **base_kwargs,
-            temperature=0.7,
-            top_p=0.8,
-            top_k=20,
-        )
+        return ChatOllama(**base_kwargs, temperature=0.7, top_p=0.8, top_k=20)
 
     return ChatOllama(**base_kwargs, temperature=0)

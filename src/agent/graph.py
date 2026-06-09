@@ -15,10 +15,12 @@ Key fixes (Jun 2026)
   final answer call. Raised to 300.
 - _strip_chunk_metadata now also strips the 'GEFUNDENE ABSCHNITTE' header
   and '--- Abschnitt N ---' section dividers.
-- done_reason='length' + content='' on Phase 2: qwen3 thinking consumed
-  all 300 tokens before writing any answer. Fix: pass think=False to
-  Ollama API for llm_plain. /nothink prompt token is unreliable via
-  langchain_ollama and is now removed from the Phase 2 prompt.
+- done_reason='length' + content='' on Phase 2: qwen3.5 thinking consumed
+  all 300 tokens before writing any answer.
+  Fix: use a dedicated qwen3.5-nothink Ollama model (Modelfile.qwen3.5-nothink)
+  that hardcodes /no_think in the chat template. ChatOllama 1.1.0 does not
+  forward think=False to the Ollama API so the Modelfile approach is the
+  only reliable solution.
 """
 from __future__ import annotations
 
@@ -44,7 +46,7 @@ logger = logging.getLogger(__name__)
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
-_ANSWER_NUM_PREDICT: int = 300  # 150 caused done_reason='length', content=''
+_ANSWER_NUM_PREDICT: int = 300
 
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 
@@ -62,6 +64,22 @@ def _is_thinking_model(model: str) -> bool:
     return any(s in model.lower() for s in _THINKING_MODEL_SUBSTRINGS)
 
 
+def _nothink_model(model: str) -> str:
+    """Derive the nothink Ollama model name from a thinking model name.
+
+    qwen3.5:4b -> qwen3.5-nothink
+    qwen3:4b   -> qwen3-nothink
+    For non-thinking models returns the model unchanged.
+
+    The nothink variant must be created once via:
+        ollama create qwen3.5-nothink -f Modelfile.qwen3.5-nothink
+    """
+    if not _is_thinking_model(model):
+        return model
+    base = model.split(":")[0]  # strip tag e.g. ':4b'
+    return f"{base}-nothink"
+
+
 def _count_tool_calls(messages: list) -> int:
     return sum(
         1 for m in messages
@@ -70,12 +88,7 @@ def _count_tool_calls(messages: list) -> int:
 
 
 def _split_tool_output(raw: str) -> list[str]:
-    """Split one big tool output string into individual chunk strings.
-
-    search_term returns all chunks as a single string separated by
-    '--- Abschnitt N ---' headers. trim_retrieval_context needs a list
-    of individual snippets, not one giant blob.
-    """
+    """Split one big tool output string into individual chunk strings."""
     parts = re.split(r"--- Abschnitt \d+ ---", raw)
     return [p.strip() for p in parts if p.strip() and not p.strip().startswith("GEFUNDENE")]
 
@@ -128,7 +141,7 @@ def _build_answer_prompt(question: str, ctx_text: str) -> str:
 def build_agent(
     retriever: BBoxRetriever,
     provider: str = "ollama",
-    model: str = "qwen3:4b",
+    model: str = "qwen3.5:4b",
     domain_spec: DomainSpec | None = None,
     graph: object = None,
     all_chunks: list[Chunk] | None = None,
@@ -147,9 +160,11 @@ def build_agent(
     )
     tool_node = ToolNode(tools)
     llm_with_tools = _build_llm(provider, model, num_ctx=num_ctx).bind_tools(tools)
-    # think=False only for Phase 2: we need a direct answer, not a reasoning chain.
-    # llm_with_tools keeps thinking enabled for better tool-call decisions.
-    llm_plain = _build_llm(provider, model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT, no_think=True)
+    # Phase 2 uses the nothink variant — same weights, thinking disabled via Modelfile template.
+    # ChatOllama 1.1.0 does not support the think=False kwarg so we rely on the Modelfile.
+    plain_model = _nothink_model(model) if provider == "ollama" else model
+    llm_plain = _build_llm(provider, plain_model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
+    logger.info("Phase-1 model: %s  |  Phase-2 model: %s", model, plain_model)
     no_think = _is_thinking_model(model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
@@ -160,12 +175,10 @@ def build_agent(
             question = _get_last_human_question(messages) or ""
             trimmed = trim_retrieval_context(tool_outputs)
             if not trimmed:
-                # Budget too tight — just take the first 3 chunks raw
                 trimmed = tool_outputs[:3]
             clean_chunks = [_strip_chunk_metadata(t) for t in trimmed]
             ctx_text = "\n\n".join(c for c in clean_chunks if c)
             prompt = _build_answer_prompt(question, ctx_text)
-            # No /nothink suffix needed — think=False is set at the API level in llm_plain
             msg = HumanMessage(content=prompt)
             logger.info(
                 "Final-answer phase: %d chunks, ctx ~%d chars, question=%.60s",
@@ -208,7 +221,6 @@ def _build_llm(
     model: str,
     num_ctx: int = _DEFAULT_NUM_CTX,
     num_predict: int | None = None,
-    no_think: bool = False,
 ) -> Any:
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # noqa: PLC0415
@@ -225,10 +237,6 @@ def _build_llm(
         base_kwargs["num_predict"] = num_predict
 
     if _is_thinking_model(model):
-        ollama_kwargs: dict[str, Any] = {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
-        if no_think:
-            # Disable thinking at the Ollama API level — more reliable than /nothink token
-            ollama_kwargs["think"] = False
-        return ChatOllama(**base_kwargs, **ollama_kwargs)
+        return ChatOllama(**base_kwargs, temperature=0.7, top_p=0.8, top_k=20)
 
     return ChatOllama(**base_kwargs, temperature=0)

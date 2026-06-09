@@ -45,6 +45,8 @@ _OLLAMA_MODELS = [
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
 _MAX_SOURCE_PILLS = 5
+_CTX_OPTIONS = [1024, 2048, 4096]
+_DEFAULT_CTX = 2048
 
 _CSS = """
 <style>
@@ -330,6 +332,13 @@ def main() -> None:
         else:
             self_rag_gate = 0.5
 
+        ctx_limit = st.select_slider(
+            "Context window (tokens)",
+            options=_CTX_OPTIONS,
+            value=_DEFAULT_CTX,
+            help="Lower = less RAM. 2048 recommended for 5 GB free RAM.",
+        )
+
         st.divider()
         uploaded = st.file_uploader("Upload PDF", type="pdf")
         if uploaded and st.button("⚡ Index document", type="primary", use_container_width=True):
@@ -443,6 +452,7 @@ def main() -> None:
                             all_chunks=all_chunks,
                             self_rag_enabled=enable_self_rag,
                             self_rag_bm25_gate=self_rag_gate,
+                            num_ctx=ctx_limit,
                         )
                         result = agent.invoke(
                             {"messages": [HumanMessage(content=prompt)]}

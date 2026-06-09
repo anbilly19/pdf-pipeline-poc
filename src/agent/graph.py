@@ -26,19 +26,23 @@ if TYPE_CHECKING:
 # GPU layers: -1 = Ollama auto-detect (use all VRAM available).
 # Override via OLLAMA_NUM_GPU in .env (e.g. 0 for CPU-only).
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
-_DEFAULT_NUM_CTX: int = 4096
+
+# Default context window kept low to stay within 5 GB free RAM on this machine.
+# Raise to 4096 only if a model fits comfortably (check `free -h` first).
+_DEFAULT_NUM_CTX: int = 2048
 
 
 def build_agent(
     retriever: BBoxRetriever,
     provider: str = "ollama",
-    model: str = "gemma4:e2b",
+    model: str = "qwen3:4b",
     domain_spec: DomainSpec | None = None,
     graph: object = None,
     all_chunks: list[Chunk] | None = None,
     checkpointer: Any = None,
     self_rag_enabled: bool = True,
     self_rag_bm25_gate: float = 0.5,
+    num_ctx: int = _DEFAULT_NUM_CTX,
 ) -> Any:
     tools = build_tools(
         retriever,
@@ -50,7 +54,7 @@ def build_agent(
     )
     tool_node = ToolNode(tools)
 
-    llm = _build_llm(provider, model)
+    llm = _build_llm(provider, model, num_ctx=num_ctx)
     llm_with_tools = llm.bind_tools(tools)
 
     system_prompt = _system_prompt(domain_spec)
@@ -65,7 +69,7 @@ def build_agent(
             messages.append(
                 SystemMessage(
                     content=(
-                        "Folgende Dokumentenausz\u00fcge wurden f\u00fcr diese Anfrage abgerufen:\n\n"
+                        "Folgende Dokumentenauszüge wurden für diese Anfrage abgerufen:\n\n"
                         + ctx_text
                     )
                 )
@@ -88,7 +92,7 @@ def build_agent(
     return workflow.compile(checkpointer=checkpointer)
 
 
-def _build_llm(provider: str, model: str) -> Any:
+def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> Any:
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # noqa: PLC0415
         return ChatOpenAI(model=model, temperature=0)
@@ -98,14 +102,14 @@ def _build_llm(provider: str, model: str) -> Any:
         model=model,
         temperature=0,
         num_gpu=_OLLAMA_NUM_GPU,
-        num_ctx=_DEFAULT_NUM_CTX,
+        num_ctx=num_ctx,
     )
 
 
 def _system_prompt(domain_spec: DomainSpec | None) -> str:
     base = (
-        "Du bist ein pr\u00e4ziser Dokumentenanalyst. "
-        "Beantworte Fragen ausschlie\u00dflich auf Basis des bereitgestellten Dokuments. "
+        "Du bist ein präziser Dokumentenanalyst. "
+        "Beantworte Fragen ausschließlich auf Basis des bereitgestellten Dokuments. "
         "Wenn die Information nicht im Dokument steht, sage das klar. "
         "Antworte auf Deutsch."
     )

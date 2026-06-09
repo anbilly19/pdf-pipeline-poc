@@ -2,18 +2,11 @@
 
 Qwen3 sampling parameters
 --------------------------
-Official Qwen3 non-thinking recommendations (Unsloth / Qwen docs):
-  temperature = 0.7   (NOT 0 — greedy causes loops and repetition)
-  top_p       = 0.8
-  top_k       = 20
+  temperature = 0.7, top_p = 0.8, top_k = 20  (Unsloth/Qwen official)
 
-Thinking mode is disabled by appending /nothink to the LAST HumanMessage
-before each LLM call. Ollama only reads this tag from the human turn,
-not from the system prompt.
+Thinking disabled via /nothink appended to last HumanMessage.
 
-Loop guard
-----------
-MAX_TOOL_ITERATIONS caps tool calls per turn to prevent infinite loops.
+Loop guard: MAX_TOOL_ITERATIONS = 4
 """
 from __future__ import annotations
 
@@ -151,16 +144,32 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
 
 
 def _system_prompt(domain_spec: DomainSpec | None) -> str:
+    # Few-shot examples teach the model the exact expected behaviour.
+    # This is more reliable than rule lists for small models like qwen3:4b.
     base = (
-        "Du bist ein Dokumentenanalyst. "
-        "Deine einzige Aufgabe: Fragen zum bereitgestellten Vertragsdokument beantworten.\n\n"
-        "REGELN — strikt einhalten:\n"
-        "1. Benutze IMMER zuerst 'search_term', um relevante Abschnitte abzurufen.\n"
-        "2. Beantworte die Frage DIREKT auf Deutsch, nur auf Basis der abgerufenen Abschnitte.\n"
-        "3. Leere Formularfelder oder fehlende Infos: sag genau das — erfinde NICHTS.\n"
-        "4. Gib KEINE Liste m\u00f6glicher Aktionen oder Hilfsangebote aus.\n"
-        "5. Frage NICHT nach, was du tun sollst. Antworte sofort.\n"
-        "6. Maximal 2x 'search_term' pro Frage aufrufen, dann antworten."
+        "Du bist ein spezialisierter Vertragsanalyst. "
+        "Beantworte AUSSCHLIESSLICH Fragen zum vorliegenden Vertragsdokument.\n\n"
+        # Hard negative examples — show the model exactly what NOT to do
+        "VERBOTEN — diese Antwortmuster sind absolut unzul\u00e4ssig:\n"
+        "- \"Welche Hilfe ben\u00f6tigen Sie?\" → VERBOTEN\n"
+        "- \"Was m\u00f6chten Sie mit diesem Dokument tun?\" → VERBOTEN\n"
+        "- \"Ich kann Ihnen helfen mit: ...\" → VERBOTEN\n"
+        "- Zusammenfassungen von Abschnitten ohne Bezug zur Frage → VERBOTEN\n"
+        "- Antworten ohne vorherigen search_term-Aufruf → VERBOTEN\n\n"
+        # Positive few-shot
+        "BEISPIEL KORREKTE ANTWORT:\n"
+        "Frage: \"Was ist die vereinbarte Verg\u00fctung?\"\n"
+        "Antwort: \"Die Verg\u00fctung erfolgt nach Aufwand pro Stunde. "
+        "Ein konkreter Betrag ist im Formular nicht eingetragen (Felder leer).\"\n\n"
+        "BEISPIEL KORREKTE ANTWORT:\n"
+        "Frage: \"Wann endet der Vertrag?\"\n"
+        "Antwort: \"Der Vertrag endet am 31.12.2025 gem\u00e4\u00df \u00a715. "
+        "Eine Verl\u00e4ngerungsoption bis 31.12.2026 muss bis 30.09.2025 aus\u00fcbt werden.\"\n\n"
+        "ABLAUF PRO FRAGE:\n"
+        "1. search_term aufrufen (max. 2x)\n"
+        "2. Frage direkt und pr\u00e4zise auf Deutsch beantworten\n"
+        "3. Wenn Information fehlt: \"Diese Information ist im Dokument nicht enthalten.\"\n"
+        "4. FERTIG. Keine weiteren Angebote, keine R\u00fcckfragen."
     )
     if domain_spec and domain_spec.system_prompt:
         return f"{base}\n\n{domain_spec.system_prompt}"

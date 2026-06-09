@@ -11,16 +11,11 @@ Key fixes (Jun 2026)
   concatenated). trim_retrieval_context received a list of 1 item that
   exceeded 4500 chars and returned [] — causing empty Dokumentauszüge.
   Fix: split on '--- Abschnitt' boundaries before trimming.
-- num_predict=150 caused done_reason='length' and content='' on the
-  final answer call. Raised to 300.
-- _strip_chunk_metadata now also strips the 'GEFUNDENE ABSCHNITTE' header
-  and '--- Abschnitt N ---' section dividers.
-- done_reason='length' + content='' on Phase 2: qwen3.5 thinking consumed
-  all 300 tokens before writing any answer.
-  Fix: use a dedicated qwen3.5-nothink Ollama model (Modelfile.qwen3.5-nothink)
-  that hardcodes /no_think in the chat template. ChatOllama 1.1.0 does not
-  forward think=False to the Ollama API so the Modelfile approach is the
-  only reliable solution.
+- num_predict=300 still caused done_reason='length'+content='' because
+  qwen3.5 emits a <think> block first. Raised to 1024 and added
+  _strip_think() to remove <think>...</think> from the response.
+- Phase-2 uses qwen3.5-nothink (Modelfile with /no_think in template)
+  as primary attempt; _strip_think() is a safety net for both models.
 """
 from __future__ import annotations
 
@@ -46,7 +41,7 @@ logger = logging.getLogger(__name__)
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
-_ANSWER_NUM_PREDICT: int = 300
+_ANSWER_NUM_PREDICT: int = 1024  # 300 was consumed entirely by <think> block
 
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 
@@ -58,6 +53,7 @@ _SECTION_HEADER_RE = re.compile(
     r"^GEFUNDENE ABSCHNITTE.*$|^--- Abschnitt \d+ ---$",
     re.MULTILINE,
 )
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def _is_thinking_model(model: str) -> bool:
@@ -68,16 +64,19 @@ def _nothink_model(model: str) -> str:
     """Derive the nothink Ollama model name from a thinking model name.
 
     qwen3.5:4b -> qwen3.5-nothink
-    qwen3:4b   -> qwen3-nothink
     For non-thinking models returns the model unchanged.
-
-    The nothink variant must be created once via:
-        ollama create qwen3.5-nothink -f Modelfile.qwen3.5-nothink
+    Create once via: ollama create qwen3.5-nothink -f Modelfile.qwen3.5-nothink
     """
     if not _is_thinking_model(model):
         return model
-    base = model.split(":")[0]  # strip tag e.g. ':4b'
+    base = model.split(":")[0]
     return f"{base}-nothink"
+
+
+def _strip_think(text: str) -> str:
+    """Remove <think>...</think> block and leading whitespace from response."""
+    cleaned = _THINK_RE.sub("", text)
+    return cleaned.strip()
 
 
 def _count_tool_calls(messages: list) -> int:
@@ -88,13 +87,11 @@ def _count_tool_calls(messages: list) -> int:
 
 
 def _split_tool_output(raw: str) -> list[str]:
-    """Split one big tool output string into individual chunk strings."""
     parts = re.split(r"--- Abschnitt \d+ ---", raw)
     return [p.strip() for p in parts if p.strip() and not p.strip().startswith("GEFUNDENE")]
 
 
 def _get_tool_outputs(messages: list) -> list[str]:
-    """Extract and split all ToolMessage contents into individual chunks."""
     chunks: list[str] = []
     for m in messages:
         if isinstance(m, ToolMessage) and m.content:
@@ -104,7 +101,6 @@ def _get_tool_outputs(messages: list) -> list[str]:
 
 
 def _strip_chunk_metadata(text: str) -> str:
-    """Strip source/bbox/image_path metadata lines from a chunk."""
     cleaned = _METADATA_RE.sub("", text)
     cleaned = _SECTION_HEADER_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
@@ -160,8 +156,6 @@ def build_agent(
     )
     tool_node = ToolNode(tools)
     llm_with_tools = _build_llm(provider, model, num_ctx=num_ctx).bind_tools(tools)
-    # Phase 2 uses the nothink variant — same weights, thinking disabled via Modelfile template.
-    # ChatOllama 1.1.0 does not support the think=False kwarg so we rely on the Modelfile.
     plain_model = _nothink_model(model) if provider == "ollama" else model
     llm_plain = _build_llm(provider, plain_model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
     logger.info("Phase-1 model: %s  |  Phase-2 model: %s", model, plain_model)
@@ -185,6 +179,12 @@ def build_agent(
                 len(clean_chunks), len(ctx_text), question,
             )
             response = llm_plain.invoke([msg])
+            # Strip <think> block in case nothink model still emits one
+            raw_content = response.content if isinstance(response.content, str) else ""
+            answer = _strip_think(raw_content)
+            if answer != raw_content:
+                logger.info("Stripped <think> block from Phase-2 response.")
+                response = response.model_copy(update={"content": answer})
             return {"messages": [response]}
 
         system_prompt = (

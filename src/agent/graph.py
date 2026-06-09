@@ -1,9 +1,16 @@
 """LangGraph agent definition with persistent session memory.
 
-Qwen3 thinking mode
--------------------
-Disabled via ChatOllama(thinking=False) — supported in langchain-ollama >= 0.2.3.
-Falls back gracefully if the param is rejected (older installs).
+Qwen3 sampling parameters
+--------------------------
+Official Qwen3 non-thinking recommendations (Unsloth / Qwen docs):
+  temperature = 0.7   (NOT 0 — greedy causes loops and repetition)
+  top_p       = 0.8
+  top_k       = 20
+  min_p       = 0.0
+
+Thinking mode is disabled by injecting /nothink into the system
+prompt — the only reliable method for Ollama regardless of
+langchain-ollama version.
 
 Loop guard
 ----------
@@ -71,7 +78,7 @@ def build_agent(
 
     llm = _build_llm(provider, model, num_ctx=num_ctx)
     llm_with_tools = llm.bind_tools(tools)
-    system_prompt = _system_prompt(domain_spec)
+    system_prompt = _system_prompt(domain_spec, model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
         retrieval_ctx = state.get("retrieval_context", [])
@@ -81,9 +88,7 @@ def build_agent(
         if trimmed:
             ctx_text = "\n\n".join(trimmed)
             messages.append(
-                SystemMessage(
-                    content="Dokumentauszüge:\n\n" + ctx_text
-                )
+                SystemMessage(content="Dokumentausz\u00fcge:\n\n" + ctx_text)
             )
         messages += state["messages"]
         return {"messages": [llm_with_tools.invoke(messages)]}
@@ -112,43 +117,41 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
 
     from langchain_ollama import ChatOllama  # noqa: PLC0415
 
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "temperature": 0,
-        "num_gpu": _OLLAMA_NUM_GPU,
-        "num_ctx": num_ctx,
-    }
-
     if _is_thinking_model(model):
-        # langchain-ollama >= 0.2.3 supports thinking=False natively.
-        # This maps to Ollama's /api/chat "think": false parameter.
-        try:
-            kwargs["thinking"] = False
-            test = ChatOllama(**kwargs)
-            logger.info("Thinking mode disabled for model '%s'", model)
-        except TypeError:
-            # Older langchain-ollama — remove unsupported param and warn.
-            kwargs.pop("thinking", None)
-            logger.warning(
-                "langchain-ollama does not support thinking=False — "
-                "upgrade with: uv add langchain-ollama --upgrade"
-            )
+        # Qwen3 official non-thinking recommended params.
+        # temperature=0 (greedy) must NOT be used — causes loops and repetition.
+        return ChatOllama(
+            model=model,
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            num_gpu=_OLLAMA_NUM_GPU,
+            num_ctx=num_ctx,
+        )
 
-    return ChatOllama(**kwargs)
+    return ChatOllama(
+        model=model,
+        temperature=0,
+        num_gpu=_OLLAMA_NUM_GPU,
+        num_ctx=num_ctx,
+    )
 
 
-def _system_prompt(domain_spec: DomainSpec | None) -> str:
+def _system_prompt(domain_spec: DomainSpec | None, model: str = "") -> str:
+    # /nothink disables Qwen3 thinking mode at the prompt level —
+    # works reliably in Ollama regardless of langchain-ollama version.
+    no_think_tag = " /nothink" if _is_thinking_model(model) else ""
+
     base = (
-        "Du bist ein Dokumentenanalyst. Deine einzige Aufgabe ist es, "
-        "Fragen zum bereitgestellten Vertragsdokument zu beantworten.\n\n"
-        "REGELN — halte dich strikt daran:\n"
-        "1. Benutze IMMER zuerst das Tool 'search_term', um relevante Abschnitte abzurufen.\n"
-        "2. Beantworte die Frage DIREKT auf Deutsch, basierend NUR auf den abgerufenen Abschnitten.\n"
-        "3. Wenn ein Formularfeld leer ist oder eine Information nicht im Dokument steht, "
-        "sage genau das — erfinde NICHTS.\n"
-        "4. Gib KEINE Liste von m\u00f6glichen Aktionen oder Hilfsangeboten aus.\n"
-        "5. Frage NICHT nach, was du tun soll. Beantworte die Frage sofort.\n"
-        "6. Rufe 'search_term' maximal 2x pro Frage auf, dann antworte."
+        f"Du bist ein Dokumentenanalyst.{no_think_tag}\n\n"
+        "Deine einzige Aufgabe: Fragen zum bereitgestellten Vertragsdokument beantworten.\n\n"
+        "REGELN — strikt einhalten:\n"
+        "1. Benutze IMMER zuerst 'search_term', um relevante Abschnitte abzurufen.\n"
+        "2. Beantworte die Frage DIREKT auf Deutsch, nur auf Basis der abgerufenen Abschnitte.\n"
+        "3. Leere Formularfelder oder fehlende Infos: sag genau das — erfinde NICHTS.\n"
+        "4. Gib KEINE Liste m\u00f6glicher Aktionen oder Hilfsangebote aus.\n"
+        "5. Frage NICHT nach, was du tun sollst. Antworte sofort.\n"
+        "6. Maximal 2x 'search_term' pro Frage aufrufen, dann antworten."
     )
     if domain_spec and domain_spec.system_prompt:
         return f"{base}\n\n{domain_spec.system_prompt}"

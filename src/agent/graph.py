@@ -1,24 +1,17 @@
 """LangGraph agent definition with persistent session memory.
 
-GPU / CPU policy
------------------
-All models use GPU by default (num_gpu=-1 = Ollama auto-detect).
-
 Qwen3 thinking mode
 -------------------
-Qwen3 models default to extended <think>...</think> reasoning chains
-which massively increase latency without improving RAG answer quality.
-We disable thinking via extra_body={"think": False}.
+Disabled via ChatOllama(thinking=False) — supported in langchain-ollama >= 0.2.3.
+Falls back gracefully if the param is rejected (older installs).
 
 Loop guard
 ----------
-The agent is limited to MAX_TOOL_ITERATIONS tool calls per turn.
-After the limit is hit the graph routes directly to END so the LLM
-formulates an answer from whatever context it has accumulated,
-preventing infinite retrieve→LLM→retrieve loops.
+MAX_TOOL_ITERATIONS caps tool calls per turn to prevent infinite loops.
 """
 from __future__ import annotations
 
+import logging
 import os
 from typing import TYPE_CHECKING, Any
 
@@ -34,22 +27,20 @@ if TYPE_CHECKING:
     from src.agent.domain_config import DomainSpec
     from src.retrieval.retriever import BBoxRetriever
 
+logger = logging.getLogger(__name__)
+
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 2048
-
-# Maximum tool-call iterations per user turn before forcing a final answer.
 MAX_TOOL_ITERATIONS: int = 4
 
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 
 
 def _is_thinking_model(model: str) -> bool:
-    lower = model.lower()
-    return any(s in lower for s in _THINKING_MODEL_SUBSTRINGS)
+    return any(s in model.lower() for s in _THINKING_MODEL_SUBSTRINGS)
 
 
 def _count_tool_calls(messages: list) -> int:
-    """Count how many AIMessages with tool_calls exist in the current message list."""
     return sum(
         1 for m in messages
         if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
@@ -80,7 +71,6 @@ def build_agent(
 
     llm = _build_llm(provider, model, num_ctx=num_ctx)
     llm_with_tools = llm.bind_tools(tools)
-
     system_prompt = _system_prompt(domain_spec)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
@@ -92,21 +82,16 @@ def build_agent(
             ctx_text = "\n\n".join(trimmed)
             messages.append(
                 SystemMessage(
-                    content=(
-                        "Folgende Dokumentenausz\u00fcge wurden f\u00fcr diese Anfrage abgerufen:\n\n"
-                        + ctx_text
-                    )
+                    content="Dokumentauszüge:\n\n" + ctx_text
                 )
             )
         messages += state["messages"]
-        response = llm_with_tools.invoke(messages)
-        return {"messages": [response]}
+        return {"messages": [llm_with_tools.invoke(messages)]}
 
     def should_continue(state: AgentState) -> str:
         last = state["messages"][-1]
         if not getattr(last, "tool_calls", None):
             return END  # type: ignore[return-value]
-        # Loop guard: if we've already hit the iteration cap, force END.
         if _count_tool_calls(state["messages"]) >= MAX_TOOL_ITERATIONS:
             return END  # type: ignore[return-value]
         return "tools"
@@ -117,7 +102,6 @@ def build_agent(
     workflow.set_entry_point("agent")
     workflow.add_conditional_edges("agent", should_continue)
     workflow.add_edge("tools", "agent")
-
     return workflow.compile(checkpointer=checkpointer)
 
 
@@ -136,19 +120,35 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
     }
 
     if _is_thinking_model(model):
-        kwargs["extra_body"] = {"think": False}
+        # langchain-ollama >= 0.2.3 supports thinking=False natively.
+        # This maps to Ollama's /api/chat "think": false parameter.
+        try:
+            kwargs["thinking"] = False
+            test = ChatOllama(**kwargs)
+            logger.info("Thinking mode disabled for model '%s'", model)
+        except TypeError:
+            # Older langchain-ollama — remove unsupported param and warn.
+            kwargs.pop("thinking", None)
+            logger.warning(
+                "langchain-ollama does not support thinking=False — "
+                "upgrade with: uv add langchain-ollama --upgrade"
+            )
 
     return ChatOllama(**kwargs)
 
 
 def _system_prompt(domain_spec: DomainSpec | None) -> str:
     base = (
-        "Du bist ein pr\u00e4ziser Dokumentenanalyst. "
-        "Beantworte Fragen ausschlie\u00dflich auf Basis des bereitgestellten Dokuments. "
-        "Wenn die Information nicht im Dokument steht, sage das klar. "
-        "Antworte auf Deutsch. "
-        "WICHTIG: Nachdem du Abschnitte abgerufen hast, formuliere SOFORT eine Antwort. "
-        "Rufe das Such-Tool nicht mehr als 2 Mal pro Frage auf."
+        "Du bist ein Dokumentenanalyst. Deine einzige Aufgabe ist es, "
+        "Fragen zum bereitgestellten Vertragsdokument zu beantworten.\n\n"
+        "REGELN — halte dich strikt daran:\n"
+        "1. Benutze IMMER zuerst das Tool 'search_term', um relevante Abschnitte abzurufen.\n"
+        "2. Beantworte die Frage DIREKT auf Deutsch, basierend NUR auf den abgerufenen Abschnitten.\n"
+        "3. Wenn ein Formularfeld leer ist oder eine Information nicht im Dokument steht, "
+        "sage genau das — erfinde NICHTS.\n"
+        "4. Gib KEINE Liste von m\u00f6glichen Aktionen oder Hilfsangeboten aus.\n"
+        "5. Frage NICHT nach, was du tun soll. Beantworte die Frage sofort.\n"
+        "6. Rufe 'search_term' maximal 2x pro Frage auf, dann antworte."
     )
     if domain_spec and domain_spec.system_prompt:
         return f"{base}\n\n{domain_spec.system_prompt}"

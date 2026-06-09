@@ -59,8 +59,9 @@ def _needs_e5_prefix(model_name: str) -> bool:
 class ChunkEmbedder:
     """Embeds Chunk objects into dense vectors.
 
-    Tries Ollama first; falls back to sentence-transformers if Ollama
-    is unavailable or returns zero/constant vectors.
+    Tries Ollama first (via direct ollama SDK, not langchain_ollama which
+    routes through an internal proxy on a random port in 0.3+); falls back
+    to sentence-transformers if Ollama is unavailable or returns zero vectors.
 
     The sentence-transformers fallback loads from the local HuggingFace
     cache only (local_files_only=True). Run with ALLOW_HF_DOWNLOAD=1
@@ -133,9 +134,17 @@ class ChunkEmbedder:
         return self._st_embed(texts)
 
     def _ollama_embed(self, texts: list[str]) -> list[list[float]]:
-        from langchain_ollama import OllamaEmbeddings  # noqa: PLC0415
-        client = OllamaEmbeddings(model=self._model, base_url=self._base_url)
-        return client.embed_documents(texts)  # type: ignore[return-value]
+        """Embed via the ollama SDK directly.
+
+        Uses ollama.Client instead of langchain_ollama.OllamaEmbeddings.
+        langchain-ollama 0.3+ routes embed() through an internal HTTP proxy
+        on a random ephemeral port, causing 400 errors and wsarecv resets
+        on Windows. The ollama SDK hits localhost:11434 directly.
+        """
+        import ollama  # noqa: PLC0415
+        client = ollama.Client(host=self._base_url)
+        response = client.embed(model=self._model, input=texts)
+        return response.embeddings  # type: ignore[return-value]
 
     def _st_embed(self, texts: list[str]) -> list[list[float]]:
         """Embed using sentence-transformers from local cache only.

@@ -3,23 +3,26 @@
 GPU / CPU policy
 -----------------
 All models use GPU by default (num_gpu=-1 = Ollama auto-detect).
-No per-model CPU overrides are needed now that phi4-mini-reasoning
-has been removed (it does not support the tools API).
 
 Qwen3 thinking mode
 -------------------
 Qwen3 models default to extended <think>...</think> reasoning chains
 which massively increase latency without improving RAG answer quality.
-We disable thinking via extra_body={"think": False} when the model
-name contains "qwen3" or "qwen2.5". This maps to Ollama's /api/chat
-"think" parameter introduced in Ollama 0.6.5.
+We disable thinking via extra_body={"think": False}.
+
+Loop guard
+----------
+The agent is limited to MAX_TOOL_ITERATIONS tool calls per turn.
+After the limit is hit the graph routes directly to END so the LLM
+formulates an answer from whatever context it has accumulated,
+preventing infinite retrieve→LLM→retrieve loops.
 """
 from __future__ import annotations
 
 import os
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import SystemMessage, AIMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -31,21 +34,26 @@ if TYPE_CHECKING:
     from src.agent.domain_config import DomainSpec
     from src.retrieval.retriever import BBoxRetriever
 
-# GPU layers: -1 = Ollama auto-detect (use all VRAM available).
-# Override via OLLAMA_NUM_GPU in .env (e.g. 0 for CPU-only).
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
+_DEFAULT_NUM_CTX: int = 2048
 
-# Default context window kept low to stay within 5 GB free RAM on this machine.
-_DEFAULT_NUM_CTX: int = 512
+# Maximum tool-call iterations per user turn before forcing a final answer.
+MAX_TOOL_ITERATIONS: int = 4
 
-# Models that support (and default to) extended thinking chains.
-# We disable thinking by default for faster RAG responses.
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 
 
 def _is_thinking_model(model: str) -> bool:
     lower = model.lower()
     return any(s in lower for s in _THINKING_MODEL_SUBSTRINGS)
+
+
+def _count_tool_calls(messages: list) -> int:
+    """Count how many AIMessages with tool_calls exist in the current message list."""
+    return sum(
+        1 for m in messages
+        if isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+    )
 
 
 def build_agent(
@@ -85,7 +93,7 @@ def build_agent(
             messages.append(
                 SystemMessage(
                     content=(
-                        "Folgende Dokumentenauszüge wurden für diese Anfrage abgerufen:\n\n"
+                        "Folgende Dokumentenausz\u00fcge wurden f\u00fcr diese Anfrage abgerufen:\n\n"
                         + ctx_text
                     )
                 )
@@ -96,7 +104,12 @@ def build_agent(
 
     def should_continue(state: AgentState) -> str:
         last = state["messages"][-1]
-        return "tools" if last.tool_calls else END  # type: ignore[return-value]
+        if not getattr(last, "tool_calls", None):
+            return END  # type: ignore[return-value]
+        # Loop guard: if we've already hit the iteration cap, force END.
+        if _count_tool_calls(state["messages"]) >= MAX_TOOL_ITERATIONS:
+            return END  # type: ignore[return-value]
+        return "tools"
 
     workflow = StateGraph(AgentState)
     workflow.add_node("agent", call_model)
@@ -122,9 +135,6 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
         "num_ctx": num_ctx,
     }
 
-    # Disable extended thinking chains on Qwen3 / DeepSeek-R / similar models.
-    # This cuts first-token latency from 30-120s down to ~2-5s with no RAG quality loss.
-    # Ollama passes extra_body fields directly to the /api/chat payload.
     if _is_thinking_model(model):
         kwargs["extra_body"] = {"think": False}
 
@@ -133,10 +143,12 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
 
 def _system_prompt(domain_spec: DomainSpec | None) -> str:
     base = (
-        "Du bist ein präziser Dokumentenanalyst. "
-        "Beantworte Fragen ausschließlich auf Basis des bereitgestellten Dokuments. "
+        "Du bist ein pr\u00e4ziser Dokumentenanalyst. "
+        "Beantworte Fragen ausschlie\u00dflich auf Basis des bereitgestellten Dokuments. "
         "Wenn die Information nicht im Dokument steht, sage das klar. "
-        "Antworte auf Deutsch."
+        "Antworte auf Deutsch. "
+        "WICHTIG: Nachdem du Abschnitte abgerufen hast, formuliere SOFORT eine Antwort. "
+        "Rufe das Such-Tool nicht mehr als 2 Mal pro Frage auf."
     )
     if domain_spec and domain_spec.system_prompt:
         return f"{base}\n\n{domain_spec.system_prompt}"

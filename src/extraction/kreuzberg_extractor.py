@@ -27,11 +27,13 @@ ExtractionError with a clear install hint.  The router catches this
 and demotes to PyMuPDF automatically.
 
 If a page has a very low confidence score (e.g. scanned image page)
-the router’s per-page confidence check will trigger the PyMuPDF
+the router's per-page confidence check will trigger the PyMuPDF
 fallback for that individual page.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 from pathlib import Path
 
@@ -88,7 +90,22 @@ class KreuzbergExtractor(BaseExtractor):
             ) from exc
 
         try:
-            document = kreuzberg.extract_file(str(pdf_path))
+            coro = kreuzberg.extract_file(str(pdf_path))
+            if asyncio.iscoroutine(coro):
+                try:
+                    asyncio.get_running_loop()
+                    # Already inside a running event loop (e.g. Streamlit).
+                    # Dispatch to a worker thread to avoid nested-loop error.
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                        document = pool.submit(asyncio.run, coro).result()
+                except RuntimeError:
+                    # No running loop — safe to block directly.
+                    document = asyncio.run(coro)
+            else:
+                # kreuzberg < 4.x returned a plain object (sync path)
+                document = coro
+        except ExtractionError:
+            raise
         except Exception as exc:  # noqa: BLE001
             raise ExtractionError(
                 f"Kreuzberg failed to parse {pdf_path.name}: {exc}"

@@ -6,11 +6,10 @@ Official Qwen3 non-thinking recommendations (Unsloth / Qwen docs):
   temperature = 0.7   (NOT 0 — greedy causes loops and repetition)
   top_p       = 0.8
   top_k       = 20
-  min_p       = 0.0
 
-Thinking mode is disabled by injecting /nothink into the system
-prompt — the only reliable method for Ollama regardless of
-langchain-ollama version.
+Thinking mode is disabled by appending /nothink to the LAST HumanMessage
+before each LLM call. Ollama only reads this tag from the human turn,
+not from the system prompt.
 
 Loop guard
 ----------
@@ -22,7 +21,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
-from langchain_core.messages import SystemMessage, AIMessage
+from langchain_core.messages import SystemMessage, AIMessage, HumanMessage
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
@@ -54,6 +53,18 @@ def _count_tool_calls(messages: list) -> int:
     )
 
 
+def _append_nothink(messages: list) -> list:
+    """Append /nothink to the last HumanMessage so Ollama skips the think block."""
+    result = list(messages)
+    for i in range(len(result) - 1, -1, -1):
+        if isinstance(result[i], HumanMessage):
+            content = result[i].content
+            if "/nothink" not in content:
+                result[i] = HumanMessage(content=content + " /nothink")
+            break
+    return result
+
+
 def build_agent(
     retriever: BBoxRetriever,
     provider: str = "ollama",
@@ -78,7 +89,8 @@ def build_agent(
 
     llm = _build_llm(provider, model, num_ctx=num_ctx)
     llm_with_tools = llm.bind_tools(tools)
-    system_prompt = _system_prompt(domain_spec, model)
+    system_prompt = _system_prompt(domain_spec)
+    no_think = _is_thinking_model(model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
         retrieval_ctx = state.get("retrieval_context", [])
@@ -90,7 +102,10 @@ def build_agent(
             messages.append(
                 SystemMessage(content="Dokumentausz\u00fcge:\n\n" + ctx_text)
             )
-        messages += state["messages"]
+        history = list(state["messages"])
+        if no_think:
+            history = _append_nothink(history)
+        messages += history
         return {"messages": [llm_with_tools.invoke(messages)]}
 
     def should_continue(state: AgentState) -> str:
@@ -118,8 +133,6 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
     from langchain_ollama import ChatOllama  # noqa: PLC0415
 
     if _is_thinking_model(model):
-        # Qwen3 official non-thinking recommended params.
-        # temperature=0 (greedy) must NOT be used — causes loops and repetition.
         return ChatOllama(
             model=model,
             temperature=0.7,
@@ -137,13 +150,9 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
     )
 
 
-def _system_prompt(domain_spec: DomainSpec | None, model: str = "") -> str:
-    # /nothink disables Qwen3 thinking mode at the prompt level —
-    # works reliably in Ollama regardless of langchain-ollama version.
-    no_think_tag = " /nothink" if _is_thinking_model(model) else ""
-
+def _system_prompt(domain_spec: DomainSpec | None) -> str:
     base = (
-        f"Du bist ein Dokumentenanalyst.{no_think_tag}\n\n"
+        "Du bist ein Dokumentenanalyst. "
         "Deine einzige Aufgabe: Fragen zum bereitgestellten Vertragsdokument beantworten.\n\n"
         "REGELN — strikt einhalten:\n"
         "1. Benutze IMMER zuerst 'search_term', um relevante Abschnitte abzurufen.\n"

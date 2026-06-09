@@ -58,6 +58,14 @@ def _append_nothink(messages: list) -> list:
     return result
 
 
+def _get_last_human_question(messages: list) -> str | None:
+    """Return the text of the most recent HumanMessage (without /nothink tag)."""
+    for m in reversed(messages):
+        if isinstance(m, HumanMessage):
+            return m.content.replace(" /nothink", "").strip()
+    return None
+
+
 def build_agent(
     retriever: BBoxRetriever,
     provider: str = "ollama",
@@ -90,11 +98,22 @@ def build_agent(
         trimmed = trim_retrieval_context(retrieval_ctx)
 
         messages: list = [SystemMessage(content=system_prompt)]
+
+        # Anchor context with the original question so the model
+        # answers specifically rather than summarising everything.
         if trimmed:
+            question = _get_last_human_question(state["messages"]) or ""
             ctx_text = "\n\n".join(trimmed)
             messages.append(
-                SystemMessage(content="Dokumentausz\u00fcge:\n\n" + ctx_text)
+                SystemMessage(
+                    content=(
+                        f"Beantworte NUR diese Frage: {question}\n\n"
+                        f"Relevante Dokumentausz\u00fcge:\n\n{ctx_text}\n\n"
+                        f"Antworte in 1-3 S\u00e4tzen, pr\u00e4zise und direkt auf die Frage."
+                    )
+                )
             )
+
         history = list(state["messages"])
         if no_think:
             history = _append_nothink(history)
@@ -146,21 +165,17 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
 def _system_prompt(domain_spec: DomainSpec | None) -> str:
     base = (
         "Du bist ein spezialisierter Vertragsanalyst. "
-        "Beantworte AUSSCHLIESSLICH Fragen zum vorliegenden Vertragsdokument.\n\n"
+        "Beantworte AUSSCHLIESSLICH die gestellte Frage zum vorliegenden Vertragsdokument.\n\n"
         "VERBOTENE Antwortmuster:\n"
         "- Angebote wie 'Was m\u00f6chten Sie tun?' oder 'Ich kann helfen mit...' → VERBOTEN\n"
-        "- Zusammenfassungen von Abschnitten ohne Bezug zur gestellten Frage → VERBOTEN\n"
+        "- Zusammenfassungen von Abschnitten ohne Bezug zur Frage → VERBOTEN\n"
         "- Antworten ohne vorherigen search_term-Aufruf → VERBOTEN\n\n"
-        # Generic structural examples — no contract-specific values
-        "BEISPIEL (Struktur, nicht Inhalt):\n"
-        "Frage: [Frage zum Vertrag]\n"
-        "Schritt 1: search_term aufrufen mit passendem Suchbegriff\n"
-        "Schritt 2: Antwort direkt formulieren, z.B.:\n"
-        "  - Wenn gefunden: \"Laut \u00a7X des Dokuments gilt: [Inhalt aus Abschnitt]\"\n"
-        "  - Wenn Feld leer: \"Das Feld ist im Dokument nicht ausgef\u00fcllt.\"\n"
-        "  - Wenn nicht vorhanden: \"Diese Information ist im Dokument nicht enthalten.\"\n\n"
-        "Maximal 2x search_term aufrufen, dann sofort antworten. "
-        "Keine R\u00fcckfragen. Keine Hilfsangebote. Nur die Antwort."
+        "ABLAUF:\n"
+        "1. search_term aufrufen (max. 2x)\n"
+        "2. NUR die gestellte Frage beantworten — in 1-3 S\u00e4tzen\n"
+        "3. Fehlende Info: 'Diese Information ist im Dokument nicht enthalten.'\n"
+        "4. Leeres Formularfeld: 'Das Feld ist im Dokument nicht ausgef\u00fcllt.'\n"
+        "5. Fertig. Keine R\u00fcckfragen, keine Hilfsangebote."
     )
     if domain_spec and domain_spec.system_prompt:
         return f"{base}\n\n{domain_spec.system_prompt}"

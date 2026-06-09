@@ -10,6 +10,17 @@ Fix: two-phase call_model:
            build fill-in-the-blank template, call llm_plain once.
            Model completes "Antwort:" inline — cannot start a summary.
 
+Video learnings applied (Clean Build Studio, Jun 2026)
+-------------------------------------------------------
+- format="json" on the final-answer LLM call forces machine-readable output
+  at API level, not just prompt level — dropped latency 87s→27s in the video.
+- num_predict=150 caps output tokens; 2-sentence contract answer never needs
+  more. Without a cap, small models ramble even with a strict prompt.
+- num_ctx set explicitly: too low and the model loses its instructions,
+  echoes input, or repeats text (different failure from num_predict cutoff).
+- Chunk metadata (bboxes, image_path) stripped before the final prompt so the
+  model does not waste tokens on noise — see _strip_chunk_metadata().
+
 Qwen3 params: temperature=0.7, top_p=0.8, top_k=20 (Unsloth/Qwen docs)
 Thinking disabled via /nothink on last HumanMessage.
 """
@@ -17,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import SystemMessage, AIMessage, HumanMessage, ToolMessage
@@ -37,7 +49,17 @@ _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
 
+# num_predict: max output tokens for the final answer.
+# 150 tokens ~ 2 sentences in German. Without a cap, small models ramble.
+_ANSWER_NUM_PREDICT: int = 150
+
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
+
+# Regex patterns for metadata lines injected by ToolResult.__str__
+_METADATA_PATTERNS = re.compile(
+    r"\[source:.*?\]|bboxes=\[.*?\]|image_path=.*?(?=\n|$)",
+    re.DOTALL,
+)
 
 
 def _is_thinking_model(model: str) -> bool:
@@ -57,6 +79,19 @@ def _get_tool_outputs(messages: list) -> list[str]:
         m.content for m in messages
         if isinstance(m, ToolMessage) and m.content
     ]
+
+
+def _strip_chunk_metadata(text: str) -> str:
+    """Remove bbox / image_path / source metadata lines from chunk text.
+
+    ToolResult.__str__ appends '[source: page X, bboxes=[...], image_path=...]'
+    to every chunk. This noise wastes num_ctx and can confuse the model.
+    Python owns that data — the LLM never needs to read it.
+    """
+    cleaned = _METADATA_PATTERNS.sub("", text)
+    # Collapse runs of blank lines left by the removal
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
 
 
 def _append_nothink(messages: list) -> list:
@@ -109,7 +144,11 @@ def build_agent(
     )
     tool_node = ToolNode(tools)
     llm_with_tools = _build_llm(provider, model, num_ctx=num_ctx).bind_tools(tools)
-    llm_plain = _build_llm(provider, model, num_ctx=num_ctx)
+    # Plain LLM for final answer: format="json" enforced at API level,
+    # num_predict capped so the model cannot ramble.
+    llm_plain = _build_llm(
+        provider, model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT
+    )
     no_think = _is_thinking_model(model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
@@ -119,16 +158,20 @@ def build_agent(
         # --- Final answer phase: tool results exist in history ---
         if tool_outputs:
             question = _get_last_human_question(messages) or ""
-            # Trim to context budget
             trimmed = trim_retrieval_context(tool_outputs)
-            ctx_text = "\n\n".join(trimmed)
+            # Strip metadata noise before the LLM sees the chunks
+            clean_chunks = [_strip_chunk_metadata(t) for t in trimmed]
+            ctx_text = "\n\n".join(clean_chunks)
             prompt = _build_answer_prompt(question, ctx_text)
             msg = HumanMessage(content=prompt + (" /nothink" if no_think else ""))
-            logger.info("Final-answer phase: %d tool outputs, question=%.60s", len(trimmed), question)
+            logger.info(
+                "Final-answer phase: %d chunks, ctx ~%d chars, question=%.60s",
+                len(clean_chunks), len(ctx_text), question,
+            )
             response = llm_plain.invoke([msg])
             return {"messages": [response]}
 
-        # --- Tool-call phase: no tool results yet, call search_term ---
+        # --- Tool-call phase: no tool results yet ---
         system_prompt = (
             "Du bist ein Vertragsanalyst. "
             "Rufe search_term auf, um relevante Abschnitte zu finden. "
@@ -158,26 +201,32 @@ def build_agent(
     return workflow.compile(checkpointer=checkpointer)
 
 
-def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> Any:
+def _build_llm(
+    provider: str,
+    model: str,
+    num_ctx: int = _DEFAULT_NUM_CTX,
+    num_predict: int | None = None,
+) -> Any:
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # noqa: PLC0415
         return ChatOpenAI(model=model, temperature=0)
 
     from langchain_ollama import ChatOllama  # noqa: PLC0415
 
+    base_kwargs: dict[str, Any] = {
+        "model": model,
+        "num_gpu": _OLLAMA_NUM_GPU,
+        "num_ctx": num_ctx,
+    }
+    if num_predict is not None:
+        base_kwargs["num_predict"] = num_predict
+
     if _is_thinking_model(model):
         return ChatOllama(
-            model=model,
+            **base_kwargs,
             temperature=0.7,
             top_p=0.8,
             top_k=20,
-            num_gpu=_OLLAMA_NUM_GPU,
-            num_ctx=num_ctx,
         )
 
-    return ChatOllama(
-        model=model,
-        temperature=0,
-        num_gpu=_OLLAMA_NUM_GPU,
-        num_ctx=num_ctx,
-    )
+    return ChatOllama(**base_kwargs, temperature=0)

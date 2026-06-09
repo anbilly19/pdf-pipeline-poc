@@ -34,20 +34,13 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Models ordered by tool-calling reliability for this machine (16 GB RAM / 4 GB VRAM).
-# qwen3:4b  — strong tool calling, fits comfortably in 4 GB VRAM, good German support.
-# gemma4:e4b — Google Gemma 4 4B, efficient MoE variant, solid multilingual + tool calling.
-# qwen2.5:3b / qwen2.5:7b kept as fallbacks (7b CPU-offload friendly on this config).
-# llama3.1:8b / mistral:7b as last-resort fallbacks.
-# phi4-mini-reasoning removed — no tool-call support confirmed.
-# qwen3:8b / gemma4:e2b removed — exceed reliable VRAM budget on RTX 2080 Ti 4 GB.
+# Models currently installed on this machine.
+# Ordered by expected usefulness for local German contract QA and tool calling.
 _OLLAMA_MODELS = [
-    "qwen3:4b",         # primary: best tool-calling/size ratio, strong German, fits VRAM
-    "gemma4:e4b",       # primary: Google Gemma4 4B MoE, good multilingual + tool calling
-    "qwen2.5:7b",       # fallback: reliable tool calling, CPU-offload friendly
-    "qwen2.5:3b",       # lightweight fallback
-    "llama3.1:8b",      # solid tool calling, widely tested
-    "mistral:7b",       # decent tool calling
+    "qwen3:4b",     # primary default
+    "gemma4:e2b",   # smaller/faster Gemma option
+    "qwen2.5:3b",   # lightweight fallback
+    "gemma4:e4b",   # larger Gemma option
 ]
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15

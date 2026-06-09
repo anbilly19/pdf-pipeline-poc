@@ -10,6 +10,7 @@ Usage
     python -m src.agent.runner --no-self-rag
     python -m src.agent.runner --no-reranker
     python -m src.agent.runner --provider openai --model gpt-4o-mini
+    python -m src.agent.runner --num-ctx 4096
 """
 from __future__ import annotations
 
@@ -25,7 +26,7 @@ load_dotenv()
 
 from langchain_core.messages import HumanMessage
 
-from src.agent.graph import build_agent
+from src.agent.graph import build_agent, _DEFAULT_NUM_CTX
 from src.agent.memory import make_checkpointer, make_thread_config
 from src.agent.router import route_query
 from src.agent.domain_config import load_active_config
@@ -38,27 +39,20 @@ from src.retrieval.store import FAISSStore
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
+_DEFAULT_MODEL = "gemma4:e2b"
+
 
 def run_cli(
     provider: str = "ollama",
-    model: str = "gemma4:e2b",
+    model: str = _DEFAULT_MODEL,
     reranker_model: str = "bge-reranker-v2-m3",
     enable_reranker: bool = True,
     memory_backend: str = "memory",
     self_rag_enabled: bool = True,
     self_rag_bm25_gate: float = 0.5,
+    num_ctx: int = _DEFAULT_NUM_CTX,
 ) -> None:
-    """Start an interactive multi-turn CLI session.
-
-    Args:
-        provider: LLM provider (``'ollama'`` or ``'openai'``).
-        model: Model name.
-        reranker_model: Ollama cross-encoder model name.
-        enable_reranker: Whether to load the reranker.
-        memory_backend: ``'memory'`` or ``'sqlite'``.
-        self_rag_enabled: Enable Self-RAG filter (disable to reduce latency).
-        self_rag_bm25_gate: BM25 gate threshold above which Self-RAG is skipped.
-    """
+    """Start an interactive multi-turn CLI session."""
     if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set.")
 
@@ -111,13 +105,15 @@ def run_cli(
         checkpointer=checkpointer,
         self_rag_enabled=self_rag_enabled,
         self_rag_bm25_gate=self_rag_bm25_gate,
+        num_ctx=num_ctx,
     )
 
     tracing = os.getenv("LANGCHAIN_TRACING_V2", "false")
     self_rag_status = f"bm25_gate={self_rag_bm25_gate}" if self_rag_enabled else "off"
     print(
         f"\nPDF Agent ready "
-        f"(provider={provider}, doc_type={doc_config.doc_type}, "
+        f"(provider={provider}, model={model}, num_ctx={num_ctx}, "
+        f"doc_type={doc_config.doc_type}, "
         f"reranker={'on' if reranker else 'off'}, "
         f"self_rag={self_rag_status}, "
         f"memory={memory_backend}, tracing={tracing})"
@@ -154,16 +150,17 @@ def run_cli(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider", default="ollama", choices=["ollama", "openai"])
-    parser.add_argument("--model", default="gemma4:e2b")
+    parser.add_argument("--model", default=_DEFAULT_MODEL)
     parser.add_argument("--reranker-model", default="bge-reranker-v2-m3")
     parser.add_argument("--no-reranker", action="store_true")
     parser.add_argument("--memory", dest="memory_backend", default="memory",
                         choices=["memory", "sqlite"])
-    parser.add_argument("--no-self-rag", action="store_true",
-                        help="Disable Self-RAG relevance filter")
+    parser.add_argument("--no-self-rag", action="store_true")
     parser.add_argument("--self-rag-gate", type=float, default=0.5,
-                        dest="self_rag_bm25_gate",
-                        help="BM25 gate threshold (default 0.5)")
+                        dest="self_rag_bm25_gate")
+    parser.add_argument("--num-ctx", type=int, default=_DEFAULT_NUM_CTX,
+                        dest="num_ctx",
+                        help=f"Ollama context window size (default {_DEFAULT_NUM_CTX})")
     args = parser.parse_args()
     run_cli(
         provider=args.provider,
@@ -173,4 +170,5 @@ if __name__ == "__main__":
         memory_backend=args.memory_backend,
         self_rag_enabled=not args.no_self_rag,
         self_rag_bm25_gate=args.self_rag_bm25_gate,
+        num_ctx=args.num_ctx,
     )

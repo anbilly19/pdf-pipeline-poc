@@ -22,7 +22,9 @@ dependencies = [
     "streamlit>=1.43",
     # Core
     "pillow>=11.0",
-    "pydantic>=2.10",
+    # pydantic: pin <2.12 — pydantic-core 2.46.x (pulled by newer pydantic) breaks
+    # pydantic._internal._dataclasses which langchain_core.utils.function_calling needs
+    "pydantic>=2.10,<2.12",
     "httpx>=0.28",
     "tenacity>=9.0",
     "fitz>=0.0.1.dev2",

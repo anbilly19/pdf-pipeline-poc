@@ -99,8 +99,6 @@ def build_agent(
 
         messages: list = [SystemMessage(content=system_prompt)]
 
-        # Anchor context with the original question so the model
-        # answers specifically rather than summarising everything.
         if trimmed:
             question = _get_last_human_question(state["messages"]) or ""
             ctx_text = "\n\n".join(trimmed)
@@ -109,7 +107,8 @@ def build_agent(
                     content=(
                         f"Beantworte NUR diese Frage: {question}\n\n"
                         f"Relevante Dokumentausz\u00fcge:\n\n{ctx_text}\n\n"
-                        f"Antworte in 1-3 S\u00e4tzen, pr\u00e4zise und direkt auf die Frage."
+                        f"Antworte in 1-3 S\u00e4tzen. "
+                        f"Zitiere Zahlen, Zeitangaben und Begriffe w\u00f6rtlich aus dem Text."
                     )
                 )
             )
@@ -167,15 +166,16 @@ def _system_prompt(domain_spec: DomainSpec | None) -> str:
         "Du bist ein spezialisierter Vertragsanalyst. "
         "Beantworte AUSSCHLIESSLICH die gestellte Frage zum vorliegenden Vertragsdokument.\n\n"
         "VERBOTENE Antwortmuster:\n"
-        "- Angebote wie 'Was m\u00f6chten Sie tun?' oder 'Ich kann helfen mit...' → VERBOTEN\n"
-        "- Zusammenfassungen von Abschnitten ohne Bezug zur Frage → VERBOTEN\n"
-        "- Antworten ohne vorherigen search_term-Aufruf → VERBOTEN\n\n"
+        "- Angebote wie 'Was m\u00f6chten Sie tun?' oder 'Ich kann helfen mit...' \u2192 VERBOTEN\n"
+        "- Zusammenfassungen von Abschnitten ohne Bezug zur Frage \u2192 VERBOTEN\n"
+        "- Antworten ohne vorherigen search_term-Aufruf \u2192 VERBOTEN\n\n"
         "ABLAUF:\n"
         "1. search_term aufrufen (max. 2x)\n"
-        "2. NUR die gestellte Frage beantworten — in 1-3 S\u00e4tzen\n"
-        "3. Fehlende Info: 'Diese Information ist im Dokument nicht enthalten.'\n"
-        "4. Leeres Formularfeld: 'Das Feld ist im Dokument nicht ausgef\u00fcllt.'\n"
-        "5. Fertig. Keine R\u00fcckfragen, keine Hilfsangebote."
+        "2. NUR die gestellte Frage beantworten \u2014 in 1-3 S\u00e4tzen\n"
+        "3. Zahlen, Zeitangaben und Begriffe w\u00f6rtlich aus dem Dokument zitieren\n"
+        "4. Fehlende Info: 'Diese Information ist im Dokument nicht enthalten.'\n"
+        "5. Leeres Formularfeld: 'Das Feld ist im Dokument nicht ausgef\u00fcllt.'\n"
+        "6. Fertig. Keine R\u00fcckfragen, keine Hilfsangebote."
     )
     if domain_spec and domain_spec.system_prompt:
         return f"{base}\n\n{domain_spec.system_prompt}"

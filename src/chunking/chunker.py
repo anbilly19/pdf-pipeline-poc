@@ -4,18 +4,16 @@ Handles both:
 - ODL output: elements are already individual paragraphs (split by element)
 - PyMuPDF output: entire page or section blob in one element (split by section pattern)
 
-Sliding window overlap (Roadmap #3)
-------------------------------------
+Sliding window overlap
+----------------------
 After all hard chunks are produced for a page, an overlap pass injects a
 bridging chunk between each consecutive pair that straddles the boundary.
-This prevents answers being cut in two when the relevant sentence falls
-exactly at the end of one chunk and the start of the next.
+Default overlap ratio raised to 25% so that adjacent sub-clauses (e.g.
+"08:00" start time in one chunk and "17:00" end time in the next) are
+always captured in a single bridging chunk.
 
-Default overlap ratio: 12 % of max_chars (configurable via ChunkerConfig).
-Only text chunks are overlapped; table chunks are never modified.
-
-Bbox contract: the bridging chunk inherits the union of the tail chunk’s
-and head chunk’s bounding boxes so citation coordinates remain valid.
+Bbox contract: the bridging chunk inherits the union of the tail chunk's
+and head chunk's bounding boxes so citation coordinates remain valid.
 """
 from __future__ import annotations
 
@@ -30,8 +28,8 @@ logger = logging.getLogger(__name__)
 _DEFAULT_MAX_CHARS = 800
 _MIN_CHUNK_CHARS = 40
 _MIN_BBOX_AREA = 50.0
-_DEFAULT_OVERLAP_RATIO = 0.12   # 12 % ≈ ~96 chars of an 800-char chunk
-_MIN_OVERLAP_CHARS = 40          # never create an overlap shorter than this
+_DEFAULT_OVERLAP_RATIO = 0.25   # raised from 0.12 — bridges split sub-clauses
+_MIN_OVERLAP_CHARS = 40
 
 _NOISE_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"EVB-IT\s+Dienst", re.IGNORECASE),
@@ -62,7 +60,7 @@ class ChunkerConfig:
         min_chunk_chars: Chunks shorter than this are discarded.
         deduplicate: Remove near-duplicate chunks.
         overlap_ratio: Fraction of max_chars used as overlap window (0 = disabled).
-                       Recommended: 0.10–0.15 (10–15 %).
+                       Raised to 0.25 to bridge split sub-clauses.
     """
     max_chars: int = _DEFAULT_MAX_CHARS
     min_chunk_chars: int = _MIN_CHUNK_CHARS
@@ -77,12 +75,6 @@ def _valid_bbox(bbox: list[float]) -> bool:
 
 
 def _union_bboxes(a: list[list[float]], b: list[list[float]]) -> list[list[float]]:
-    """Return the union bbox list of two bbox collections.
-
-    When both collections lie on the same page this produces the minimal
-    enclosing rectangle.  When they span two pages (cross-page overlap)
-    both bbox lists are concatenated so all source regions are preserved.
-    """
     valid_a = [bb for bb in a if _valid_bbox(bb)]
     valid_b = [bb for bb in b if _valid_bbox(bb)]
     all_bboxes = valid_a + valid_b
@@ -100,10 +92,6 @@ def _is_standalone_heading(text: str) -> bool:
 
 
 def _split_on_inline_sections(text: str) -> list[tuple[str, bool]]:
-    """Split a text blob at embedded section boundaries.
-
-    Returns list of (fragment, is_heading) tuples.
-    """
     parts: list[tuple[str, bool]] = []
     last = 0
     for m in _INLINE_SECTION_RE.finditer(text):
@@ -120,24 +108,12 @@ def _split_on_inline_sections(text: str) -> list[tuple[str, bool]]:
 
 
 class LayoutChunker:
-    """Layout-aware chunker with optional sliding window overlap.
-
-    Args:
-        config: ChunkerConfig instance.  Defaults to 800-char chunks, 12% overlap.
-    """
+    """Layout-aware chunker with optional sliding window overlap."""
 
     def __init__(self, config: ChunkerConfig | None = None) -> None:
         self._cfg = config or ChunkerConfig()
 
     def chunk(self, pages: list[Page]) -> list[Chunk]:
-        """Chunk all pages and apply overlap bridging.
-
-        Args:
-            pages: List of normalised Page objects.
-
-        Returns:
-            Interleaved list of primary + overlap-bridge chunks, filtered.
-        """
         raw_chunks: list[Chunk] = []
         for page in pages:
             raw_chunks.extend(self._chunk_page(page))
@@ -151,29 +127,7 @@ class LayoutChunker:
         )
         return filtered
 
-    # ------------------------------------------------------------------
-    # Overlap pass (Roadmap #3)
-    # ------------------------------------------------------------------
-
     def _add_overlap(self, chunks: list[Chunk]) -> list[Chunk]:
-        """Insert bridging chunks between consecutive text chunk pairs.
-
-        A bridging chunk contains the tail of chunk[i] + the head of
-        chunk[i+1].  Its length is capped at overlap_chars on each side.
-        Table chunks are never used as overlap sources or targets.
-
-        The bridging chunk carries:
-        - ``chunk_type = "overlap"`` so downstream can distinguish it.
-        - ``bboxes`` = union of the two source chunks’ bboxes.
-        - ``confidence`` = min of the two source chunks’ confidences.
-        - ``page_number`` from the tail chunk (the earlier one).
-
-        Args:
-            chunks: Raw chunks from the page-chunking pass.
-
-        Returns:
-            New list with bridge chunks interleaved after each eligible pair.
-        """
         if self._cfg.overlap_ratio <= 0:
             return chunks
 
@@ -191,7 +145,6 @@ class LayoutChunker:
             tail_chunk = chunk
             head_chunk = chunks[i + 1]
 
-            # Only bridge text→text boundaries; skip if either side is a table
             if tail_chunk.chunk_type == "table" or head_chunk.chunk_type == "table":
                 continue
 
@@ -203,7 +156,6 @@ class LayoutChunker:
 
             bridge_text = f"{tail_text} {head_text}"
 
-            # Skip if bridge is too short to be useful
             if len(bridge_text) < self._cfg.min_chunk_chars:
                 continue
 
@@ -218,10 +170,6 @@ class LayoutChunker:
             result.append(bridge)
 
         return result
-
-    # ------------------------------------------------------------------
-    # Page-level chunking (unchanged logic)
-    # ------------------------------------------------------------------
 
     def _chunk_page(self, page: Page) -> list[Chunk]:
         chunks: list[Chunk] = []
@@ -301,10 +249,6 @@ class LayoutChunker:
 
         flush()
         return chunks
-
-    # ------------------------------------------------------------------
-    # Filter (unchanged logic)
-    # ------------------------------------------------------------------
 
     def _filter(self, chunks: list[Chunk]) -> list[Chunk]:
         seen: set[str] = set()

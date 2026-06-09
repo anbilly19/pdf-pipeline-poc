@@ -11,8 +11,9 @@ Key fixes (Jun 2026)
   concatenated). trim_retrieval_context received a list of 1 item that
   exceeded 4500 chars and returned [] — causing empty Dokumentauszüge.
   Fix: split on '--- Abschnitt' boundaries before trimming.
-- Switched to FieldMouse-AI/qwen3.5:4b-instruct — no thinking mode,
-  no <think> block, no Modelfile workaround needed.
+- Switched to FieldMouse-AI/qwen3.5:4b-instruct — no thinking mode.
+- Phase-2 prompt tightened: model instructed to use ONLY the most
+  directly relevant passage and ignore off-topic chunks.
 """
 from __future__ import annotations
 
@@ -40,7 +41,6 @@ _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
 _ANSWER_NUM_PREDICT: int = 300
 
-# instruct variants (e.g. qwen3.5:4b-instruct) do NOT have a thinking mode
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 _INSTRUCT_SUFFIXES = ("-instruct", ":instruct")
 
@@ -63,7 +63,6 @@ def _is_thinking_model(model: str) -> bool:
 
 
 def _strip_think(text: str) -> str:
-    """Remove <think>...</think> block (safety net for thinking models)."""
     return _THINK_RE.sub("", text).strip()
 
 
@@ -115,10 +114,15 @@ def _get_last_human_question(messages: list) -> str | None:
 
 def _build_answer_prompt(question: str, ctx_text: str) -> str:
     return (
-        f"Dokumentausz\u00fcge:\n{ctx_text}\n\n"
+        f"Du bist ein pr\u00e4ziser Vertragsanalyst. Unten stehen Ausz\u00fcge aus einem Vertrag.\n"
+        f"Beantworte die Frage ausschlie\u00dflich mit den Informationen, die DIREKT die Frage beantworten.\n"
+        f"Ignoriere Abschnitte, die nicht zur Frage passen.\n"
+        f"Antworte in maximal 2 S\u00e4tzen. Zahlen, Zeiten und Begriffe w\u00f6rtlich aus dem Text zitieren.\n"
+        f"Wenn kein Abschnitt die Frage direkt beantwortet, schreibe: "
+        f"'Die Antwort ist in den vorliegenden Ausz\u00fcgen nicht enthalten.'\n\n"
+        f"Vertragsausz\u00fcge:\n{ctx_text}\n\n"
         f"Frage: {question}\n"
-        f"Antwort (maximal 2 S\u00e4tze, ausschlie\u00dflich aus den obigen Ausz\u00fcgen, "
-        f"Zahlen und Begriffe w\u00f6rtlich zitieren):"
+        f"Antwort:"
     )
 
 

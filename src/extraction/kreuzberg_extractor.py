@@ -1,40 +1,24 @@
-"""Kreuzberg-based PDF extractor — Rust-speed, precise bounding boxes.
+"""Kreuzberg-based PDF extractor — Rust-speed text extraction.
 
-Kreuzberg (https://github.com/Goldziher/kreuzberg) is a Rust-backed
-Python library for PDF text extraction with cell-level bounding boxes.
-It requires no Java, no GPU, and no HuggingFace API.
+Kreuzberg >= 4.x returns an ExtractionResult with:
+    .content   - full extracted text (str)
+    .metadata  - dict, includes 'page_count' and optionally 'chunks'
+    .chunks    - list of Chunk objects (if chunking enabled)
 
-Install
--------
-    uv add kreuzberg
-
-Coordinate system
------------------
-Kreuzberg returns bounding boxes in PDF points (72 pts = 1 inch),
-origin at the *bottom-left* corner of the page (standard PDF convention).
-This extractor normalises to top-left origin by flipping the y-axis:
-
-    y0_normalised = page_height - bbox.y1
-    y1_normalised = page_height - bbox.y0
-
-so that all downstream consumers see a consistent top-left coordinate
-system regardless of which extractor produced the page.
+It does NOT return a document-with-pages object. This extractor uses
+extract_file_sync (synchronous variant) to stay compatible with the
+existing sync pipeline, then reconstructs per-page Page objects from
+either chunk metadata or by splitting on page boundaries in .content.
 
 Fallback
 --------
-If kreuzberg is not installed (ImportError) the extractor raises
-ExtractionError with a clear install hint.  The router catches this
-and demotes to PyMuPDF automatically.
-
-If a page has a very low confidence score (e.g. scanned image page)
-the router's per-page confidence check will trigger the PyMuPDF
-fallback for that individual page.
+If kreuzberg is not installed the extractor raises ExtractionError
+and the router demotes to PyMuPDF automatically.
 """
 from __future__ import annotations
 
-import asyncio
-import concurrent.futures
 import logging
+import re
 from pathlib import Path
 
 from src.extraction.base import BaseExtractor, ExtractionError
@@ -42,37 +26,11 @@ from src.models import Element, Page
 
 logger = logging.getLogger(__name__)
 
-# Minimum text length for an element to be considered real content
-_MIN_TEXT_LEN = 2
-# Minimum bounding box area in points² to be considered a real element
-_MIN_BBOX_AREA = 10.0
-# Default confidence for Kreuzberg elements (it does not expose a score)
 _DEFAULT_CONFIDENCE = 0.92
 
 
-def _run_coroutine(coro):
-    """Run a coroutine safely whether or not an event loop is already running."""
-    try:
-        asyncio.get_running_loop()
-        # Running inside an existing loop (Streamlit, Jupyter, etc.) —
-        # spin up a thread with its own loop to avoid nesting.
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            return pool.submit(asyncio.run, coro).result()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-
 class KreuzbergExtractor(BaseExtractor):
-    """PDF extractor backed by the Kreuzberg Rust library.
-
-    Produces precise bounding boxes at the text-block level.
-    Coordinates are normalised to top-left origin before returning.
-
-    Args:
-        confidence: Confidence value to assign to all extracted elements.
-                    Kreuzberg does not expose per-element confidence scores,
-                    so a fixed high value is used.
-    """
+    """PDF extractor backed by the Kreuzberg Rust library (v4.x API)."""
 
     def __init__(self, confidence: float = _DEFAULT_CONFIDENCE) -> None:
         self._confidence = confidence
@@ -85,8 +43,7 @@ class KreuzbergExtractor(BaseExtractor):
             pdf_path: Path to the PDF file.
 
         Returns:
-            List of normalised Page objects with bounding boxes in
-            top-left coordinate system.
+            List of normalised Page objects.
 
         Raises:
             ExtractionError: If the file cannot be read or Kreuzberg fails.
@@ -95,114 +52,113 @@ class KreuzbergExtractor(BaseExtractor):
             raise ExtractionError(f"PDF not found: {pdf_path}")
 
         try:
-            import kreuzberg  # noqa: PLC0415
+            from kreuzberg import extract_file_sync  # noqa: PLC0415
         except ImportError as exc:
             raise ExtractionError(
                 "kreuzberg is not installed. Run: uv add kreuzberg"
             ) from exc
 
         try:
-            result = kreuzberg.extract_file(str(pdf_path))
-            if asyncio.iscoroutine(result):
-                result = _run_coroutine(result)
-        except ExtractionError:
-            raise
+            result = extract_file_sync(str(pdf_path))
         except Exception as exc:  # noqa: BLE001
             raise ExtractionError(
                 f"Kreuzberg failed to parse {pdf_path.name}: {exc}"
             ) from exc
 
-        # Normalise the result: kreuzberg may return either
-        #   - a document object with a .pages attribute, or
-        #   - a list of page objects directly.
-        if result is None:
-            raise ExtractionError(
-                f"Kreuzberg returned None for {pdf_path.name}. "
-                "Check the file is a valid, non-empty PDF."
-            )
-        if isinstance(result, list):
-            raw_pages = result
-        elif hasattr(result, "pages"):
-            raw_pages = result.pages
-        else:
-            raise ExtractionError(
-                f"Unexpected kreuzberg result type {type(result)} for {pdf_path.name}."
-            )
-
-        pages: list[Page] = []
-        for page_data in raw_pages:
-            page = self._convert_page(page_data)
-            pages.append(page)
-
-        logger.info(
-            "Kreuzberg extracted %d pages from %s",
-            len(pages), pdf_path.name,
-        )
+        pages = self._result_to_pages(result)
+        logger.info("Kreuzberg extracted %d pages from %s", len(pages), pdf_path.name)
         return pages
 
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _convert_page(self, page_data: object) -> Page:
-        """Convert a Kreuzberg page object to our normalised Page model."""
-        page_height: float = getattr(page_data, "height", 842.0)  # A4 default
-        page_number: int = getattr(page_data, "number", 1)
-        image_path: str = getattr(page_data, "image_path", "")
+    def _result_to_pages(self, result: object) -> list[Page]:
+        """Convert a kreuzberg ExtractionResult to a list of Page objects.
 
-        elements: list[Element] = []
-        for block in getattr(page_data, "blocks", []):
-            element = self._convert_block(block, page_height)
-            if element is not None:
-                elements.append(element)
-
-        return Page(
-            page_number=page_number,
-            image_path=image_path,
-            elements=elements,
-        )
-
-    def _convert_block(self, block: object, page_height: float) -> Element | None:
-        """Convert a Kreuzberg text block to an Element.
-
-        Normalises the y-axis from PDF bottom-left to top-left origin.
-        Filters out empty or tiny elements.
+        Strategy (in order of preference):
+        1. Use result.chunks if available — each chunk has page_number.
+        2. Split result.content on form-feed characters (\x0c) which
+           kreuzberg inserts as page separators.
+        3. Return a single page with the full content.
         """
-        text: str = getattr(block, "text", "") or ""
-        text = text.strip()
-        if len(text) < _MIN_TEXT_LEN:
-            return None
+        # Strategy 1: chunk-based (most accurate, preserves page numbers)
+        chunks = getattr(result, "chunks", None) or []
+        if chunks:
+            return self._pages_from_chunks(chunks)
 
-        raw_bbox = getattr(block, "bbox", None)
-        if raw_bbox is None:
-            bbox = [0.0, 0.0, 0.0, 0.0]
-        else:
-            x0 = float(getattr(raw_bbox, "x0", raw_bbox[0]))
-            y0_raw = float(getattr(raw_bbox, "y0", raw_bbox[1]))
-            x1 = float(getattr(raw_bbox, "x1", raw_bbox[2]))
-            y1_raw = float(getattr(raw_bbox, "y1", raw_bbox[3]))
-            y0 = page_height - y1_raw
-            y1 = page_height - y0_raw
-            bbox = [x0, y0, x1, y1]
+        # Strategy 2: form-feed split
+        content: str = getattr(result, "content", "") or ""
+        if "\x0c" in content:
+            return self._pages_from_formfeed(content)
 
-        area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
-        if area < _MIN_BBOX_AREA and bbox != [0.0, 0.0, 0.0, 0.0]:
-            return None
+        # Strategy 3: single page fallback
+        metadata = getattr(result, "metadata", {}) or {}
+        page_count = int(metadata.get("page_count", 1))
+        if page_count > 1 and content:
+            # Try to split roughly evenly by line count
+            lines = content.splitlines(keepends=True)
+            per_page = max(1, len(lines) // page_count)
+            pages = []
+            for i in range(page_count):
+                start = i * per_page
+                end = start + per_page if i < page_count - 1 else len(lines)
+                chunk_text = "".join(lines[start:end]).strip()
+                if chunk_text:
+                    pages.append(self._make_page(i + 1, chunk_text))
+            return pages if pages else [self._make_page(1, content)]
 
-        raw_type = str(getattr(block, "type", "text")).lower()
-        if "table" in raw_type:
-            el_type = "table"
-        elif "image" in raw_type or "figure" in raw_type:
-            el_type = "image"
-        else:
-            el_type = "text"
+        return [self._make_page(1, content)] if content.strip() else []
 
-        return Element(
-            type=el_type,
-            text=text,
-            bbox=bbox,
-            confidence=self._confidence,
-        )
+    def _pages_from_chunks(self, chunks: list) -> list[Page]:
+        """Build Page objects from kreuzberg Chunk list."""
+        page_texts: dict[int, list[str]] = {}
+        for chunk in chunks:
+            page_num = int(getattr(chunk, "page_number", 1) or 1)
+            text = str(getattr(chunk, "text", "") or "").strip()
+            if text:
+                page_texts.setdefault(page_num, []).append(text)
+        return [
+            self._make_page(pnum, "\n".join(texts))
+            for pnum, texts in sorted(page_texts.items())
+        ]
+
+    def _pages_from_formfeed(self, content: str) -> list[Page]:
+        """Build Page objects by splitting on form-feed characters."""
+        raw_pages = content.split("\x0c")
+        pages = []
+        for i, text in enumerate(raw_pages, start=1):
+            text = text.strip()
+            if text:
+                pages.append(self._make_page(i, text))
+        return pages
+
+    def _make_page(self, page_number: int, text: str) -> Page:
+        """Wrap a text block in a Page with a single text Element."""
+        # Split into paragraph-level elements for finer granularity
+        elements: list[Element] = []
+        paragraphs = re.split(r"\n{2,}", text)
+        for para in paragraphs:
+            para = para.strip()
+            if len(para) >= 2:
+                elements.append(
+                    Element(
+                        type="text",
+                        text=para,
+                        bbox=[0.0, 0.0, 0.0, 0.0],  # no bbox from this API
+                        confidence=self._confidence,
+                    )
+                )
+        if not elements and text.strip():
+            elements.append(
+                Element(
+                    type="text",
+                    text=text.strip(),
+                    bbox=[0.0, 0.0, 0.0, 0.0],
+                    confidence=self._confidence,
+                )
+            )
+        return Page(page_number=page_number, image_path="", elements=elements)
 
     @staticmethod
     def _check_import() -> None:

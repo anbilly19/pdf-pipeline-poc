@@ -15,6 +15,10 @@ Key fixes (Jun 2026)
   final answer call. Raised to 300.
 - _strip_chunk_metadata now also strips the 'GEFUNDENE ABSCHNITTE' header
   and '--- Abschnitt N ---' section dividers.
+- done_reason='length' + content='' on Phase 2: qwen3 thinking consumed
+  all 300 tokens before writing any answer. Fix: pass think=False to
+  Ollama API for llm_plain. /nothink prompt token is unreliable via
+  langchain_ollama and is now removed from the Phase 2 prompt.
 """
 from __future__ import annotations
 
@@ -143,7 +147,9 @@ def build_agent(
     )
     tool_node = ToolNode(tools)
     llm_with_tools = _build_llm(provider, model, num_ctx=num_ctx).bind_tools(tools)
-    llm_plain = _build_llm(provider, model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
+    # think=False only for Phase 2: we need a direct answer, not a reasoning chain.
+    # llm_with_tools keeps thinking enabled for better tool-call decisions.
+    llm_plain = _build_llm(provider, model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT, no_think=True)
     no_think = _is_thinking_model(model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
@@ -159,7 +165,8 @@ def build_agent(
             clean_chunks = [_strip_chunk_metadata(t) for t in trimmed]
             ctx_text = "\n\n".join(c for c in clean_chunks if c)
             prompt = _build_answer_prompt(question, ctx_text)
-            msg = HumanMessage(content=prompt + (" /nothink" if no_think else ""))
+            # No /nothink suffix needed — think=False is set at the API level in llm_plain
+            msg = HumanMessage(content=prompt)
             logger.info(
                 "Final-answer phase: %d chunks, ctx ~%d chars, question=%.60s",
                 len(clean_chunks), len(ctx_text), question,
@@ -201,6 +208,7 @@ def _build_llm(
     model: str,
     num_ctx: int = _DEFAULT_NUM_CTX,
     num_predict: int | None = None,
+    no_think: bool = False,
 ) -> Any:
     if provider == "openai":
         from langchain_openai import ChatOpenAI  # noqa: PLC0415
@@ -217,6 +225,10 @@ def _build_llm(
         base_kwargs["num_predict"] = num_predict
 
     if _is_thinking_model(model):
-        return ChatOllama(**base_kwargs, temperature=0.7, top_p=0.8, top_k=20)
+        ollama_kwargs: dict[str, Any] = {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
+        if no_think:
+            # Disable thinking at the Ollama API level — more reliable than /nothink token
+            ollama_kwargs["think"] = False
+        return ChatOllama(**base_kwargs, **ollama_kwargs)
 
     return ChatOllama(**base_kwargs, temperature=0)

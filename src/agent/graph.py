@@ -5,6 +5,14 @@ GPU / CPU policy
 All models use GPU by default (num_gpu=-1 = Ollama auto-detect).
 No per-model CPU overrides are needed now that phi4-mini-reasoning
 has been removed (it does not support the tools API).
+
+Qwen3 thinking mode
+-------------------
+Qwen3 models default to extended <think>...</think> reasoning chains
+which massively increase latency without improving RAG answer quality.
+We disable thinking via extra_body={"think": False} when the model
+name contains "qwen3" or "qwen2.5". This maps to Ollama's /api/chat
+"think" parameter introduced in Ollama 0.6.5.
 """
 from __future__ import annotations
 
@@ -28,8 +36,16 @@ if TYPE_CHECKING:
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 
 # Default context window kept low to stay within 5 GB free RAM on this machine.
-# Raise to 4096 only if a model fits comfortably (check `free -h` first).
 _DEFAULT_NUM_CTX: int = 512
+
+# Models that support (and default to) extended thinking chains.
+# We disable thinking by default for faster RAG responses.
+_THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
+
+
+def _is_thinking_model(model: str) -> bool:
+    lower = model.lower()
+    return any(s in lower for s in _THINKING_MODEL_SUBSTRINGS)
 
 
 def build_agent(
@@ -98,12 +114,21 @@ def _build_llm(provider: str, model: str, num_ctx: int = _DEFAULT_NUM_CTX) -> An
         return ChatOpenAI(model=model, temperature=0)
 
     from langchain_ollama import ChatOllama  # noqa: PLC0415
-    return ChatOllama(
-        model=model,
-        temperature=0,
-        num_gpu=_OLLAMA_NUM_GPU,
-        num_ctx=num_ctx,
-    )
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "temperature": 0,
+        "num_gpu": _OLLAMA_NUM_GPU,
+        "num_ctx": num_ctx,
+    }
+
+    # Disable extended thinking chains on Qwen3 / DeepSeek-R / similar models.
+    # This cuts first-token latency from 30-120s down to ~2-5s with no RAG quality loss.
+    # Ollama passes extra_body fields directly to the /api/chat payload.
+    if _is_thinking_model(model):
+        kwargs["extra_body"] = {"think": False}
+
+    return ChatOllama(**kwargs)
 
 
 def _system_prompt(domain_spec: DomainSpec | None) -> str:

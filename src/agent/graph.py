@@ -14,6 +14,8 @@ Key fixes (Jun 2026)
 - Switched to FieldMouse-AI/qwen3.5:4b-instruct — no thinking mode.
 - Phase-2 prompt tightened: model instructed to use ONLY the most
   directly relevant passage and ignore off-topic chunks.
+- _ANSWER_NUM_PREDICT raised to 512: 300 caused done_reason='length'
+  on gemma4:e2b which outputs more verbose responses.
 """
 from __future__ import annotations
 
@@ -39,7 +41,7 @@ logger = logging.getLogger(__name__)
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
-_ANSWER_NUM_PREDICT: int = 300
+_ANSWER_NUM_PREDICT: int = 512  # 300 caused done_reason='length' on gemma4:e2b
 
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 _INSTRUCT_SUFFIXES = ("-instruct", ":instruct")

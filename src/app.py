@@ -34,13 +34,17 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Models ordered by tool-calling reliability (benchmarks 2025-2026).
-# qwen3 and qwen2.5 lead all open-source models for structured tool calling.
-# llama3.2:3b removed — unreliable tool discipline, hallucinates errors.
+# Models ordered by tool-calling reliability for this machine (16 GB RAM / 4 GB VRAM).
+# qwen3:4b  — strong tool calling, fits comfortably in 4 GB VRAM, good German support.
+# gemma4:e4b — Google Gemma 4 4B, efficient MoE variant, solid multilingual + tool calling.
+# qwen2.5:3b / qwen2.5:7b kept as fallbacks (7b CPU-offload friendly on this config).
+# llama3.1:8b / mistral:7b as last-resort fallbacks.
+# phi4-mini-reasoning removed — no tool-call support confirmed.
+# qwen3:8b / gemma4:e2b removed — exceed reliable VRAM budget on RTX 2080 Ti 4 GB.
 _OLLAMA_MODELS = [
-    "gemma4:e2b",       # best all-round; strong tool calling + German
-    "qwen3:8b",         # #1 tool-calling benchmark (Docker/Morph 2026)
-    "qwen2.5:7b",       # reliable tool calling, good speed/quality balance
+    "qwen3:4b",         # primary: best tool-calling/size ratio, strong German, fits VRAM
+    "gemma4:e4b",       # primary: Google Gemma4 4B MoE, good multilingual + tool calling
+    "qwen2.5:7b",       # fallback: reliable tool calling, CPU-offload friendly
     "qwen2.5:3b",       # lightweight fallback
     "llama3.1:8b",      # solid tool calling, widely tested
     "mistral:7b",       # decent tool calling

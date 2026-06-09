@@ -1,180 +1,74 @@
-# CLAUDE.md – Agentic PDF Pipeline with Bounding‑Box Citation
+# CLAUDE.md – Coding Standards
 
-## 1. Project Overview
-
-You are helping build a **modular, agentic document Q&A system** for complex German‑language PDFs (SG Magazin).  
-The system must answer natural‑language questions and **return precise bounding‑box coordinates** of the evidence on the original page.
-
-**Primary goal:** Every retrieved answer must be accompanied by exact page regions that can be highlighted visually.  
-**Secondary goal:** Evolve into a tool‑using agent (ReAct loop) that can explore documents, extract tables, and perform multi‑step reasoning.  
-**Hard constraint:** The entire stack must run **100% offline, no GPU required, no HuggingFace API calls**.
+This file defines **coding standards only**. It does not describe architecture, libraries, or project roadmap.
 
 ---
 
-## 2. Core Principles (Never Violate)
+## 1. General Code Style
 
-- **Bounding‑box first** – Every piece of text, table, or figure must retain its original page coordinates from the moment of PDF extraction.
-- **Parser‑agnostic** – Swap extraction engines without rewriting downstream logic.
-- **Fully local / on‑prem** – All models (LLM, embeddings, reranker) run via Ollama or are bundled with the library. No HuggingFace API, no cloud inference unless explicitly opted in.
-- **No GPU required** – All components must run on CPU. GPU is a nice-to-have, never a requirement.
-- **Agentic design** – The system must support tool use, multi‑turn interactions, and context preservation.
-
----
-
-## 3. Technology Stack (Current Choices)
-
-| Component          | Current / Target                                      | Fallback / Notes                           |
-| ------------------ | ----------------------------------------------------- | ------------------------------------------ |
-| PDF extraction     | **Kreuzberg** (Rust-based, precise bboxes, CPU)       | PyMuPDF + pymupdf4llm (CPU)                |
-| Table extraction   | **Camelot** or **pdfplumber** (cell-level bboxes)     | pymupdf4llm markdown tables                |
-| Chunking           | Layout-aware splitter with **sliding window overlap** (10–15%) | –                               |
-| Embeddings         | `intfloat/multilingual-e5-small` via Ollama           | Ollama default embedding model             |
-| Vector store       | **FAISS** (fully offline, no server)                  | –                                          |
-| Retrieval          | Hybrid BM25 + FAISS → **Ollama reranker** (cross-encoder pass) | Raw FAISS order                 |
-| Knowledge filter   | **Self-RAG loop** via local Ollama call (relevance check per chunk before generation) | Score threshold on BM25     |
-| LLM (local)        | Gemma / LeoLM via **Ollama** (CPU)                    | GPT-4o mini (cloud, only if allowed)       |
-| Memory             | **LangGraph checkpoint** with isolated keys (retrieval ctx ≠ conversation history) | Stateless per query          |
-| Frontend           | Streamlit (canvas overlays)                           | FastAPI + React                            |
-| Containerisation   | Docker (optional)                                     | –                                          |
-
-> ⚠️ **MinerU is retired** as a target. It requires GPU and heavy dependencies that violate the no-GPU, no-HuggingFace constraint. Do not reintroduce it.
+- **Python 3.10+** syntax only.
+- **Type hints** required on all function signatures — parameters and return types.
+- **Docstrings** (Google style) on every public function and class.
+- **No `print()` in production paths** — use Python's `logging` module exclusively.
+- **No magic numbers** — constants go in a dedicated `config.py` or at the module top.
+- Line length: **100 characters max**.
+- Imports: stdlib → third-party → local, separated by blank lines.
 
 ---
 
-## 4. Roadmap — Prioritised Upgrade Order
+## 2. Error Handling
 
-Follow this order. Do not skip ahead.
-
-1. **Cross-encoder reranking via Ollama** — Add a second-pass reranker after BM25+FAISS retrieval using an Ollama-hosted reranker model (e.g. `bge-reranker`). This is the single highest-ROI improvement for small model accuracy.
-2. **Embedding upgrade to `intfloat/multilingual-e5-small`** — Pull the model via Ollama. Directly improves German umlaut and compound noun retrieval quality.
-3. **Sliding window chunk overlap (10–15%)** — Fix answer truncation at chunk boundaries. Zero infrastructure cost.
-4. **Kreuzberg extraction layer** — Replace the `pdfmux`/`pymupdf-layout` extraction path with Kreuzberg for precise, Rust-speed bboxes. Validate bbox contract compatibility with `Page → Chunk → Response` chain before switching.
-5. **LangGraph persistent memory with isolated keys** — Re-introduce `langgraph-checkpoint`. Store conversation history in a separate key from retrieval context. Enables natural follow-up questions without bbox bleed.
-6. **Self-RAG knowledge filter** — After retrieval, run a local Ollama call per chunk to verify relevance before passing to the final generator. Only enable this if latency is acceptable after steps 1–5.
+- Extraction failures, missing fonts, and corrupted PDFs must **never crash the pipeline** — catch and log, then continue or fall back.
+- Use specific exception types, not bare `except Exception`.
+- Every fallback path must emit a `logging.warning()` with the reason.
 
 ---
 
-## 5. Core Data Models (Immutable Contracts)
+## 3. Bounding Box Contract
 
-### Page (after normalisation)
-```python
-@dataclass
-class Page:
-    page_number: int
-    image_path: str          # rendered PNG of the page
-    elements: List[Element]
-
-@dataclass
-class Element:
-    type: Literal["text", "table", "image"]
-    text: str                # plain or markdown
-    bbox: List[float]        # [x0, y0, x1, y1] in points or pixels
-    confidence: float        # parser confidence (0..1)
-```
-
-### Chunk (retrieval unit)
-```python
-@dataclass
-class Chunk:
-    text: str
-    page_number: int
-    bboxes: List[List[float]]   # aggregated from all elements in this chunk
-    chunk_type: Literal["text", "table", "figure"]
-    confidence: float
-    image_path: str
-```
-
-### QA Response (final output)
-```python
-@dataclass
-class QAResponse:
-    answer: str
-    sources: List[Source]
-
-@dataclass
-class Source:
-    text: str
-    page: int
-    bboxes: List[List[float]]
-    image: str   # path to page image
-```
-
-> **Citation metadata always comes from the child chunk**, even when parent-chunk context is expanded for generation.
+- **Never discard bounding boxes.** Every transformation (chunking, embedding, LLM response) must carry `bboxes: List[List[float]]` forward.
+- `bbox` format is always `[x0, y0, x1, y1]` in PDF points unless explicitly noted.
+- Citation metadata always comes from the **child chunk**, even when parent-chunk context is expanded for generation.
+- Any tool that returns extracted information must also return `(result, source_bboxes, page_number, image_path)`.
 
 ---
 
-## 6. Coding Standards & Quality Gates
+## 4. LLM / Inference Rules
 
-- **Type hints** required for all function signatures.
-- **Docstrings** (Google style) for every public function and class.
-- **Logging** using Python's `logging` module – no `print()` in production paths.
-- **Error handling** – extraction failures, missing fonts, corrupted PDFs must not crash the pipeline.
-- **Context window discipline** – never pass more than **4,000–5,000 characters** of context to the LLM in a single generation call. Small models lose citation accuracy beyond this.
-- **Unit tests** for:
-  - Normalisation layer (parser → Page)
-  - Chunking (bounding box aggregation and alignment)
-  - Retrieval (metadata integrity)
-  - Bounding‑box IoU against ground‑truth (≥0.7 acceptable for most cases).
+- All model calls go through **Ollama**. No API keys at runtime unless explicitly optional and documented.
+- **No HuggingFace API** — do not add `sentence-transformers` or any library requiring a remote HuggingFace token.
+- **No GPU assumption** — all default code paths must run on CPU. GPU branches are optional and clearly gated.
+- **Context window discipline** — never pass more than **4,000–5,000 characters** of context in a single LLM call. Small models lose citation accuracy beyond this.
+- **Self-RAG filter is latency-gated** — only invoke the relevance-check Ollama call if the chunk's BM25 score is below a configurable threshold. Do not call it unconditionally.
 
 ---
 
-## 7. Key Constraints When You Generate Code
+## 5. Function and Module Design
 
-1. **Never discard bounding boxes** – Every transformation (chunking, embedding storage, LLM response) must carry them forward.
-2. **Prefer local inference** – All model calls go through Ollama. If a code path requires an API key (e.g., OpenAI), make it optional and clearly documented.
-3. **No HuggingFace API** – Do not add `sentence-transformers` or any library that requires a HuggingFace API token at runtime. Offline model weights pulled via Ollama are acceptable.
-4. **No GPU assumption** – All default code paths must run on CPU. GPU optimisations may exist as optional branches but must never be required.
-5. **Parser fallback logic** – When Kreuzberg fails (low confidence or parse error), automatically rerun with PyMuPDF and merge results, keeping the highest‑confidence bounding boxes.
-6. **Agent tools must return metadata** – Any tool that extracts information (table, summary) must also return the source bounding boxes.
-7. **Self-RAG filter is latency-gated** – Only invoke the relevance filter Ollama call if the chunk's BM25 score is below a configurable threshold. Do not call it unconditionally.
+- Prefer **small, single-responsibility functions** over monolithic scripts.
+- Module names are `snake_case`; class names are `PascalCase`.
+- Do not put business logic in `app.py` — it is for UI wiring only.
+- Agent tools must be **stateless** — they receive inputs and return outputs with no hidden side effects.
 
 ---
 
-## 8. Agent Tool Definitions (Current + Planned)
+## 6. Testing Standards
 
-### Currently implemented
-```python
-tools = [
-    Tool(name="search_term",          # semantic + BM25 hybrid search
-         func=lambda query, top_k: ...),
-    Tool(name="extract_table_to_csv",  # find table chunk → CSV
-         func=lambda query: ...),
-    Tool(name="summarize_section",     # retrieve + combine section chunks
-         func=lambda title: ...),
-    Tool(name="highlight_section",     # return bboxes for a page region
-         func=lambda page_number, query: ...),
-]
-```
-
-### Planned (add after roadmap step 1–3)
-```python
-tools += [
-    Tool(name="rerank_and_filter",     # cross-encoder rerank via Ollama
-         func=lambda query, chunks: ...),
-    Tool(name="verify_relevance",      # Self-RAG chunk relevance check
-         func=lambda query, chunk: ...),  # returns (is_relevant: bool, score: float)
-]
-```
-
-All tools **must** return `(result, source_bboxes, page_number, image_path)`.
+- Tests live in `tests/` mirroring the `src/` structure.
+- Every public function in `extraction/`, `chunking/`, and `retrieval/` must have a unit test.
+- Required test coverage areas:
+  - Normalisation layer (parser → `Page`)
+  - Chunking (bbox aggregation and alignment)
+  - Retrieval (metadata integrity through the pipeline)
+  - Bbox IoU ≥ 0.7 against ground truth for extraction tests
+- Use `pytest` — no `unittest` boilerplate.
+- Mocks for Ollama calls are required in all unit tests (do not call live models in CI).
 
 ---
 
-## 9. Testing & Evaluation Metrics
+## 7. Commit & PR Standards
 
-- **Extraction quality** – BLEU, edit distance (text), IoU (bounding boxes) against manually annotated ground truth.
-- **Retrieval accuracy** – hit rate of top‑k chunks containing the correct answer; establish a baseline before any roadmap change.
-- **End‑to‑end** – user studies on SG Magazin PDFs to verify that highlighted regions are correct and useful.
-- **Latency budget** – Self-RAG filter (step 6) is only acceptable if total response time stays under 10s on CPU.
-
----
-
-## 10. Important Reminders for You (Claude)
-
-- When asked to modify or extend the pipeline, **always preserve the `bbox` → `Page` → `Chunk` → `Response` chain**.
-- Prefer **small, testable functions** over monolithic scripts.
-- If you are uncertain about coordinate systems (points vs pixels, PDF native vs rendered image), ask for clarification.
-- Never assume a parser will produce perfect reading order – the normalisation layer should not rely on element ordering.
-- The project is **German‑first** – ensure text processing (tokenisation, stopwords, LLM prompts) works well with German umlauts and compound nouns.
-- **Do not suggest MinerU** under any circumstances. It is permanently retired from this project.
-- **Do not suggest HuggingFace API-dependent libraries** (e.g. `sentence-transformers` with a remote token). Offline weight files pulled via Ollama are the only acceptable model delivery mechanism.
+- Commits are **atomic** — one logical change per commit.
+- Commit message format: `<type>: <short description>` (e.g. `fix: handle empty bbox list in chunker`).
+- Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
+- Do not commit commented-out code or debug `print()` statements.

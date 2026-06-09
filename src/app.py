@@ -49,7 +49,7 @@ _LARGE_MODELS = {"gemma4:e4b", "gemma4:e2b"}
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
 _MAX_SOURCE_PILLS = 5
-_CTX_OPTIONS = [1024, 2048, 4096]
+_CTX_OPTIONS = [128,256,512,1024, 2048, 4096]
 _DEFAULT_CTX = 2048
 
 _CSS = """

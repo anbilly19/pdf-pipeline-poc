@@ -33,6 +33,7 @@ dependencies = [
     "opendataloader-pdf>=2.4.7",
     "rank-bm25>=0.2.2",
     "sentence-transformers>=5.5.1",
+    "kreuzberg>=4.9.9",
 ]
 
 [build-system]

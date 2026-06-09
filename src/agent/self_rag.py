@@ -7,7 +7,7 @@ the generator.
 
 Latency gate (CLAUDE.md constraint)
 -------------------------------------
-The filter is **latency-gated**: it is only invoked when a chunk’s BM25
+The filter is **latency-gated**: it is only invoked when a chunk's BM25
 score falls *below* a configurable threshold (`bm25_gate`).  High-scoring
 BM25 chunks are considered relevant without an extra LLM call, keeping the
 common case fast.
@@ -35,7 +35,6 @@ from src.models import Chunk
 
 logger = logging.getLogger(__name__)
 
-# Prompt template — returns strict JSON so we can parse it reliably
 _RELEVANCE_PROMPT = """\
 Du bist ein Relevanzfilter für ein Dokumentenabfrage-System.
 Beurteile, ob der folgende TEXTABSCHNITT eine nützliche Antwort auf die ANFRAGE enthält.
@@ -52,56 +51,36 @@ oder
 
 "score" ist deine Sicherheit (0.0 bis 1.0)."""
 
-# Truncate chunk text sent to the filter LLM to save tokens
 _MAX_CHUNK_CHARS = 800
-# Default BM25 gate: chunks with normalised BM25 score above this are
-# auto-accepted without an LLM call
 _DEFAULT_BM25_GATE = 0.5
-# Default relevance threshold: chunks below this score are dropped
 _DEFAULT_RELEVANCE_THRESHOLD = 0.35
+_DEFAULT_TIMEOUT = 60  # seconds — gemma4:e2b can take 20-60s on first call
 
 
 @dataclass
 class SelfRAGResult:
-    """Result of a single relevance check.
-
-    Attributes:
-        chunk: The candidate chunk.
-        is_relevant: True if the filter accepted the chunk.
-        score: Filter confidence in [0.0, 1.0].
-        reason: Short explanation from the filter LLM.
-        skipped: True if the BM25 gate short-circuited the LLM call.
-    """
-
     chunk: Chunk
     is_relevant: bool
     score: float
     reason: str = ""
-    skipped: bool = False  # True = accepted via BM25 gate (no LLM call)
+    skipped: bool = False
 
 
 class ScoredChunk(NamedTuple):
-    """A chunk paired with its BM25 score for the latency gate."""
-
     chunk: Chunk
-    bm25_score: float  # normalised [0.0, 1.0]; 0.0 when unknown
+    bm25_score: float
 
 
 class SelfRAGFilter:
     """Latency-gated Self-RAG relevance filter.
 
-    Filters a list of candidate chunks by asking a local Ollama model
-    whether each chunk is relevant to the query.  Chunks with high BM25
-    scores bypass the LLM call entirely.
-
     Args:
         model: Ollama model name to use for relevance checks.
-        bm25_gate: Normalised BM25 score above which the LLM call is
-            skipped and the chunk is accepted automatically.
-        relevance_threshold: Minimum score returned by the LLM for a
-            chunk to be considered relevant.
-        enabled: Master switch.  When False, all chunks pass through
-            without any Ollama call.
+        bm25_gate: Normalised BM25 score above which the LLM call is skipped.
+        relevance_threshold: Minimum score for a chunk to be kept.
+        enabled: Master switch. When False, all chunks pass through.
+        timeout: HTTP timeout in seconds for the Ollama API call.
+                 Default 60s — gemma4:e2b can take 20-60s on cold/slow hardware.
     """
 
     def __init__(
@@ -110,32 +89,19 @@ class SelfRAGFilter:
         bm25_gate: float = _DEFAULT_BM25_GATE,
         relevance_threshold: float = _DEFAULT_RELEVANCE_THRESHOLD,
         enabled: bool = True,
+        timeout: int = _DEFAULT_TIMEOUT,
     ) -> None:
         self._model = model
         self._bm25_gate = bm25_gate
         self._relevance_threshold = relevance_threshold
         self._enabled = enabled
-
-    # ------------------------------------------------------------------
-    # Public interface
-    # ------------------------------------------------------------------
+        self._timeout = timeout
 
     def filter(
         self,
         query: str,
         scored_chunks: list[ScoredChunk],
     ) -> list[SelfRAGResult]:
-        """Filter chunks, returning only those deemed relevant.
-
-        Args:
-            query: The user’s natural-language query.
-            scored_chunks: Candidate chunks with their BM25 scores.
-
-        Returns:
-            List of SelfRAGResult objects where ``is_relevant`` is True.
-            If the filter is disabled or Ollama is unavailable, all
-            input chunks are returned as relevant.
-        """
         if not self._enabled:
             return [
                 SelfRAGResult(chunk=sc.chunk, is_relevant=True, score=1.0, skipped=True)
@@ -163,24 +129,9 @@ class SelfRAGFilter:
         chunk: Chunk,
         bm25_score: float = 0.0,
     ) -> SelfRAGResult:
-        """Check a single chunk for relevance.
-
-        Args:
-            query: The user’s query.
-            chunk: The candidate chunk.
-            bm25_score: Normalised BM25 score for the latency gate.
-
-        Returns:
-            SelfRAGResult with is_relevant, score, reason.
-        """
         return self._check_single(query, ScoredChunk(chunk=chunk, bm25_score=bm25_score))
 
-    # ------------------------------------------------------------------
-    # Internals
-    # ------------------------------------------------------------------
-
     def _check_single(self, query: str, sc: ScoredChunk) -> SelfRAGResult:
-        # BM25 gate: high-score chunks are auto-accepted
         if sc.bm25_score >= self._bm25_gate:
             return SelfRAGResult(
                 chunk=sc.chunk,
@@ -189,7 +140,6 @@ class SelfRAGFilter:
                 reason="BM25 gate passed",
                 skipped=True,
             )
-
         raw_response = self._call_ollama(query, sc.chunk.text)
         return self._parse_response(sc.chunk, raw_response)
 
@@ -203,12 +153,11 @@ class SelfRAGFilter:
             chunk_text=chunk_text[:_MAX_CHUNK_CHARS],
         )
         try:
-            # Use requests to avoid importing langchain in the hot path
             import requests  # noqa: PLC0415
             resp = requests.post(
                 "http://localhost:11434/api/generate",
                 json={"model": self._model, "prompt": prompt, "stream": False},
-                timeout=15,
+                timeout=self._timeout,
             )
             resp.raise_for_status()
             return resp.json().get("response", "{}")
@@ -217,8 +166,6 @@ class SelfRAGFilter:
             return '{"relevant": true, "score": 0.5, "reason": "filter unavailable"}'
 
     def _parse_response(self, chunk: Chunk, raw: str) -> SelfRAGResult:
-        """Parse the JSON response from the filter LLM."""
-        # Strip markdown fences if the model wrapped the JSON
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             lines = cleaned.splitlines()
@@ -249,21 +196,13 @@ def make_self_rag_filter(
     bm25_gate: float = _DEFAULT_BM25_GATE,
     relevance_threshold: float = _DEFAULT_RELEVANCE_THRESHOLD,
     enabled: bool = True,
+    timeout: int = _DEFAULT_TIMEOUT,
 ) -> SelfRAGFilter:
-    """Factory used by build_tools() to create a configured filter.
-
-    Args:
-        model: Ollama model for relevance scoring.
-        bm25_gate: BM25 score above which LLM call is skipped.
-        relevance_threshold: Minimum LLM score to keep a chunk.
-        enabled: Set False to disable all Ollama calls (useful in tests).
-
-    Returns:
-        Configured SelfRAGFilter instance.
-    """
+    """Factory used by build_tools() to create a configured filter."""
     return SelfRAGFilter(
         model=model,
         bm25_gate=bm25_gate,
         relevance_threshold=relevance_threshold,
         enabled=enabled,
+        timeout=timeout,
     )

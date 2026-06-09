@@ -11,11 +11,8 @@ Key fixes (Jun 2026)
   concatenated). trim_retrieval_context received a list of 1 item that
   exceeded 4500 chars and returned [] — causing empty Dokumentauszüge.
   Fix: split on '--- Abschnitt' boundaries before trimming.
-- num_predict=300 still caused done_reason='length'+content='' because
-  qwen3.5 emits a <think> block first. Raised to 1024 and added
-  _strip_think() to remove <think>...</think> from the response.
-- Phase-2 uses qwen3.5-nothink (Modelfile with /no_think in template)
-  as primary attempt; _strip_think() is a safety net for both models.
+- Switched to FieldMouse-AI/qwen3.5:4b-instruct — no thinking mode,
+  no <think> block, no Modelfile workaround needed.
 """
 from __future__ import annotations
 
@@ -41,9 +38,11 @@ logger = logging.getLogger(__name__)
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
-_ANSWER_NUM_PREDICT: int = 1024  # 300 was consumed entirely by <think> block
+_ANSWER_NUM_PREDICT: int = 300
 
+# instruct variants (e.g. qwen3.5:4b-instruct) do NOT have a thinking mode
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
+_INSTRUCT_SUFFIXES = ("-instruct", ":instruct")
 
 _METADATA_RE = re.compile(
     r"\[source:.*?\]|bboxes=\[.*?\]|image_path=.*?(?=\n|$)",
@@ -57,26 +56,15 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 
 def _is_thinking_model(model: str) -> bool:
-    return any(s in model.lower() for s in _THINKING_MODEL_SUBSTRINGS)
-
-
-def _nothink_model(model: str) -> str:
-    """Derive the nothink Ollama model name from a thinking model name.
-
-    qwen3.5:4b -> qwen3.5-nothink
-    For non-thinking models returns the model unchanged.
-    Create once via: ollama create qwen3.5-nothink -f Modelfile.qwen3.5-nothink
-    """
-    if not _is_thinking_model(model):
-        return model
-    base = model.split(":")[0]
-    return f"{base}-nothink"
+    lower = model.lower()
+    if any(lower.endswith(s) for s in _INSTRUCT_SUFFIXES):
+        return False
+    return any(s in lower for s in _THINKING_MODEL_SUBSTRINGS)
 
 
 def _strip_think(text: str) -> str:
-    """Remove <think>...</think> block and leading whitespace from response."""
-    cleaned = _THINK_RE.sub("", text)
-    return cleaned.strip()
+    """Remove <think>...</think> block (safety net for thinking models)."""
+    return _THINK_RE.sub("", text).strip()
 
 
 def _count_tool_calls(messages: list) -> int:
@@ -137,7 +125,7 @@ def _build_answer_prompt(question: str, ctx_text: str) -> str:
 def build_agent(
     retriever: BBoxRetriever,
     provider: str = "ollama",
-    model: str = "qwen3.5:4b",
+    model: str = "FieldMouse-AI/qwen3.5:4b-instruct",
     domain_spec: DomainSpec | None = None,
     graph: object = None,
     all_chunks: list[Chunk] | None = None,
@@ -156,9 +144,8 @@ def build_agent(
     )
     tool_node = ToolNode(tools)
     llm_with_tools = _build_llm(provider, model, num_ctx=num_ctx).bind_tools(tools)
-    plain_model = _nothink_model(model) if provider == "ollama" else model
-    llm_plain = _build_llm(provider, plain_model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
-    logger.info("Phase-1 model: %s  |  Phase-2 model: %s", model, plain_model)
+    llm_plain = _build_llm(provider, model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
+    logger.info("Agent model: %s (thinking=%s)", model, _is_thinking_model(model))
     no_think = _is_thinking_model(model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
@@ -179,11 +166,9 @@ def build_agent(
                 len(clean_chunks), len(ctx_text), question,
             )
             response = llm_plain.invoke([msg])
-            # Strip <think> block in case nothink model still emits one
             raw_content = response.content if isinstance(response.content, str) else ""
             answer = _strip_think(raw_content)
             if answer != raw_content:
-                logger.info("Stripped <think> block from Phase-2 response.")
                 response = response.model_copy(update={"content": answer})
             return {"messages": [response]}
 

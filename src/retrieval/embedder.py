@@ -34,8 +34,8 @@ from src.models import Chunk
 
 logger = logging.getLogger(__name__)
 
-# Roadmap #2: upgraded from nomic-embed-text to multilingual-e5-small
-_DEFAULT_OLLAMA_MODEL = "multilingual-e5-small"
+# Use the :latest tag to match what Ollama registers after `ollama pull multilingual-e5-small`
+_DEFAULT_OLLAMA_MODEL = "multilingual-e5-small:latest"
 _FALLBACK_ST_MODEL = "intfloat/multilingual-e5-small"
 _ZERO_THRESHOLD = 1e-6
 
@@ -178,7 +178,6 @@ class ChunkEmbedder:
                 warnings.filterwarnings("ignore", category=FutureWarning, module="transformers")
                 self._st_model = SentenceTransformer(self._fallback_model)
             logger.info("sentence-transformers model loaded.")
-        # Note: prefixes are already applied before _st_embed is called
         vecs = self._st_model.encode(
             texts,
             normalize_embeddings=True,

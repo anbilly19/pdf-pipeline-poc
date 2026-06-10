@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import os
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -13,6 +14,7 @@ from src.models import Chunk
 from src.retrieval.retriever import BBoxRetriever
 
 logger = logging.getLogger(__name__)
+_DBG = os.environ.get("DEBUG_PIPELINE", "0") == "1"
 
 _TOP_K = 8
 
@@ -43,14 +45,10 @@ def build_tools(
     retriever: BBoxRetriever,
     graph: object = None,
     all_chunks: list[Chunk] | None = None,
-    self_rag_model: str = "gemma4:e2b",   # kept for API compat, unused
-    self_rag_enabled: bool = False,         # unused — Self-RAG removed
-    self_rag_bm25_gate: float = 0.5,        # unused
+    self_rag_model: str = "gemma4:e2b",
+    self_rag_enabled: bool = False,
+    self_rag_bm25_gate: float = 0.5,
 ) -> list[object]:
-    """Build LangChain tools wired to the retrieval stack.
-
-    Self-RAG has been removed. Retrieval is purely FAISS+BM25+reranker.
-    """
     _graph_enabled = graph is not None and all_chunks is not None
 
     def _expand(chunks: list[Chunk]) -> list[Chunk]:
@@ -77,7 +75,19 @@ def build_tools(
             return NO_RESULTS
         chunks = _expand(chunks)
 
-        parts = [f"FOUND SECTIONS ({len(chunks)} total — read all):\n"]
+        # --- CHECKPOINT 6: what the tool actually sends ---
+        if _DBG:
+            logger.info(
+                "[DBG-CP6-TOOL] search_term retrieved %d chunks for query=%r",
+                len(chunks), query,
+            )
+            for i, c in enumerate(chunks[:3], 1):
+                logger.info(
+                    "[DBG-CP6-TOOL] chunk %d: page=%d  bboxes=%s  image_path=%r  text[:60]=%r",
+                    i, c.page_number, c.bboxes, c.image_path, c.text[:60],
+                )
+
+        parts = [f"FOUND SECTIONS ({len(chunks)} total \u2014 read all):\n"]
         for i, c in enumerate(chunks, 1):
             result = ToolResult(
                 content=c.text,
@@ -86,7 +96,14 @@ def build_tools(
                 image_path=c.image_path,
             )
             parts.append(f"--- Abschnitt {i} ---\n{result}")
-        return "\n\n".join(parts)
+
+        raw_output = "\n\n".join(parts)
+        if _DBG:
+            logger.info(
+                "[DBG-CP6-TOOL] raw ToolMessage snippet (first 400 chars):\n%s",
+                raw_output[:400],
+            )
+        return raw_output
 
     @tool
     def extract_table_to_csv(

@@ -1,38 +1,25 @@
-"""FAISS vector store with full bbox metadata preservation.
-
-Persists index + metadata as two files:
-    outputs/faiss_index/index.faiss  - FAISS flat cosine index
-    outputs/faiss_index/metadata.json - chunk metadata (bboxes, page, etc.)
-
-No chromadb, no transformers, no HuggingFace — fully offline.
-"""
+"""FAISS vector store with full bbox metadata preservation."""
 from __future__ import annotations
 
 import json
 import logging
+import os
 import numpy as np
 from pathlib import Path
 
 from src.models import Chunk
 
 logger = logging.getLogger(__name__)
+_DBG = os.environ.get("DEBUG_PIPELINE", "0") == "1"
 
 _INDEX_FILE = "index.faiss"
 _META_FILE = "metadata.json"
 
-# Repo root = two levels up from this file (src/retrieval/store.py)
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _DEFAULT_PERSIST_DIR = _REPO_ROOT / "outputs" / "faiss_index"
 
 
 class FAISSStore:
-    """Persisted FAISS vector store for PDF chunks.
-
-    Args:
-        persist_dir: Directory where index and metadata are saved.
-                     Defaults to <repo_root>/outputs/faiss_index (absolute).
-    """
-
     def __init__(self, persist_dir: Path = _DEFAULT_PERSIST_DIR) -> None:
         self._persist_dir = persist_dir.resolve()
         self._persist_dir.mkdir(parents=True, exist_ok=True)
@@ -43,12 +30,7 @@ class FAISSStore:
         self._texts: list[str] = []
         self._load()
 
-    # ------------------------------------------------------------------
-    # Persistence
-    # ------------------------------------------------------------------
-
     def _load(self) -> None:
-        """Load existing index and metadata from disk if present."""
         import faiss  # noqa: PLC0415
         if self._index_path.exists() and self._meta_path.exists():
             self._index = faiss.read_index(str(self._index_path))
@@ -56,23 +38,24 @@ class FAISSStore:
             self._metadata = data["metadata"]
             self._texts = data["texts"]
             logger.info("Loaded FAISS index with %d vectors from %s", len(self._metadata), self._persist_dir)
+            if _DBG and self._metadata:
+                m0 = self._metadata[0]
+                logger.info(
+                    "[DBG-STORE-LOAD] first entry: page=%s  bboxes=%s  image_path=%r",
+                    m0.get("page_number"), m0.get("bboxes"), m0.get("image_path"),
+                )
         else:
             self._index = None
-            logger.info("No existing FAISS index at %s — will create on first add", self._persist_dir)
+            logger.info("No existing FAISS index at %s", self._persist_dir)
 
     def _save(self) -> None:
-        """Persist index and metadata to disk."""
         import faiss  # noqa: PLC0415
-        self._persist_dir.mkdir(parents=True, exist_ok=True)  # guard: recreate if deleted
+        self._persist_dir.mkdir(parents=True, exist_ok=True)
         faiss.write_index(self._index, str(self._index_path))  # type: ignore[arg-type]
         self._meta_path.write_text(
             json.dumps({"metadata": self._metadata, "texts": self._texts}, ensure_ascii=False),
             encoding="utf-8",
         )
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
 
     def add_chunks(
         self,
@@ -80,26 +63,11 @@ class FAISSStore:
         embeddings: list[list[float]],
         doc_id: str,
     ) -> None:
-        """Store chunks and their embeddings.
-
-        Existing entries for the same doc_id are replaced (upsert by doc_id).
-
-        Args:
-            chunks: Chunks to store.
-            embeddings: Corresponding embedding vectors (same order).
-            doc_id: Source document identifier.
-
-        Raises:
-            ValueError: If chunks and embeddings lengths differ.
-        """
         if len(chunks) != len(embeddings):
-            raise ValueError(
-                f"chunks ({len(chunks)}) and embeddings ({len(embeddings)}) must match"
-            )
+            raise ValueError(f"chunks ({len(chunks)}) and embeddings ({len(embeddings)}) must match")
 
         import faiss  # noqa: PLC0415
 
-        # remove existing entries for this doc_id
         keep = [(t, m) for t, m in zip(self._texts, self._metadata) if m["doc_id"] != doc_id]
         kept_texts = [k[0] for k in keep]
         kept_meta = [k[1] for k in keep]
@@ -117,13 +85,29 @@ class FAISSStore:
             for c in chunks
         ]
 
+        # --- CHECKPOINT 4: what goes into the store ---
+        if _DBG and new_meta:
+            m0 = new_meta[0]
+            logger.info(
+                "[DBG-CP4-ADD] first chunk being stored: page=%s  bboxes=%s  image_path=%r",
+                m0["page_number"], m0["bboxes"], m0["image_path"],
+            )
+            zero_bbox = sum(
+                1 for m in new_meta
+                if not m["bboxes"] or m["bboxes"] == [[0.0, 0.0, 0.0, 0.0]]
+            )
+            no_img = sum(1 for m in new_meta if not m["image_path"])
+            logger.info(
+                "[DBG-CP4-ADD] zero/empty bboxes: %d/%d  empty image_path: %d/%d",
+                zero_bbox, len(new_meta), no_img, len(new_meta),
+            )
+
         self._texts = kept_texts + new_texts
         self._metadata = kept_meta + new_meta
 
-        # rebuild index from all vectors
         all_embeddings = self._rebuild_embeddings(kept_meta) + embeddings
         vectors = np.array(all_embeddings, dtype=np.float32)
-        faiss.normalize_L2(vectors)  # cosine similarity via inner product
+        faiss.normalize_L2(vectors)
 
         dim = vectors.shape[1]
         index = faiss.IndexFlatIP(dim)
@@ -139,17 +123,6 @@ class FAISSStore:
         filter_doc_id: str | None = None,
         filter_chunk_type: str | None = None,
     ) -> list[Chunk]:
-        """Retrieve the top-k most similar chunks.
-
-        Args:
-            query_embedding: Dense query vector.
-            n_results: Number of results to return.
-            filter_doc_id: Optional filter by document.
-            filter_chunk_type: Optional filter by chunk type.
-
-        Returns:
-            List of Chunk objects ordered by similarity (best first).
-        """
         if self._index is None or len(self._metadata) == 0:
             return []
 
@@ -158,7 +131,6 @@ class FAISSStore:
         vec = np.array([query_embedding], dtype=np.float32)
         faiss.normalize_L2(vec)
 
-        # fetch more candidates to allow post-filtering
         fetch_k = min(len(self._metadata), n_results * 10)
         distances, indices = self._index.search(vec, fetch_k)  # type: ignore[union-attr]
 
@@ -182,14 +154,17 @@ class FAISSStore:
             if len(chunks) >= n_results:
                 break
 
+        # --- CHECKPOINT 5: what comes out of the store ---
+        if _DBG and chunks:
+            c0 = chunks[0]
+            logger.info(
+                "[DBG-CP5-QUERY] first retrieved chunk: page=%d  bboxes=%s  image_path=%r",
+                c0.page_number, c0.bboxes, c0.image_path,
+            )
+
         return chunks
 
     def get_all_chunks(self) -> list[Chunk]:
-        """Return every stored chunk in insertion order.
-
-        Used by the graph expander which needs the full corpus to resolve
-        chunk indices from the knowledge graph.
-        """
         return [
             Chunk(
                 text=self._texts[i],
@@ -203,16 +178,9 @@ class FAISSStore:
         ]
 
     def count(self) -> int:
-        """Return total number of stored chunks."""
         return len(self._metadata)
 
     def _rebuild_embeddings(self, metadata: list[dict[str, object]]) -> list[list[float]]:
-        """Reload kept vectors from the existing on-disk index.
-
-        In practice we store all vectors in the FAISS index and keep/drop
-        by rebuilding the full index on each add_chunks call. For the PoC
-        scale this is fine.
-        """
         if not metadata or not self._index_path.exists():
             return []
         import faiss  # noqa: PLC0415

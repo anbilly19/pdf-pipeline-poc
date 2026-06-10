@@ -1,7 +1,7 @@
 """Streamlit frontend for the PDF Q&A pipeline."""
 from __future__ import annotations
 
-import src.silence  # noqa: F401  — must be first
+import src.silence  # noqa: F401
 
 import logging
 import os
@@ -28,6 +28,7 @@ from src.ui.overlay import render_page_with_bboxes
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
+_DBG = os.environ.get("DEBUG_PIPELINE", "0") == "1"
 
 OUTPUT_DIR = Path("outputs")
 DATA_DIR = Path("data")
@@ -249,7 +250,13 @@ def _extract_sources(messages: list) -> list[dict]:
     for msg in messages:
         if not isinstance(msg, ToolMessage):
             continue
-        for m in _SOURCE_RE.finditer(str(msg.content)):
+        raw = str(msg.content)
+        if _DBG:
+            logger.info(
+                "[DBG-CP7-EXTRACT] ToolMessage content snippet (first 600 chars):\n%s",
+                raw[:600],
+            )
+        for m in _SOURCE_RE.finditer(raw):
             if len(sources) >= _MAX_SOURCE_PILLS:
                 break
             try:
@@ -264,26 +271,30 @@ def _extract_sources(messages: list) -> list[dict]:
                     fallback = OUTPUT_DIR / "pages" / f"page_{page:04d}.png"
                     if fallback.exists():
                         image_path = str(fallback)
+                        if _DBG:
+                            logger.info("[DBG-CP7-EXTRACT] used fallback image_path=%r for page %d", image_path, page)
                 if not image_path:
+                    if _DBG:
+                        logger.info("[DBG-CP7-EXTRACT] SKIPPED page %d — no image_path", page)
                     continue
+                if _DBG:
+                    logger.info(
+                        "[DBG-CP7-EXTRACT] page=%d  bboxes=%s  image_path=%r",
+                        page, bboxes, image_path,
+                    )
                 sources.append({"page": page, "bboxes": bboxes, "image_path": image_path})
                 seen.add(page)
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as exc:  # noqa: BLE001
+                if _DBG:
+                    logger.info("[DBG-CP7-EXTRACT] parse error: %s  match=%r", exc, m.group(0)[:100])
+        if _DBG and not sources:
+            logger.info("[DBG-CP7-EXTRACT] _SOURCE_RE found 0 matches in ToolMessage")
     return sources
 
 
-def _status_bar_html(
-    indexed_doc: str | None,
-    stats: dict,
-    reranker_on: bool,
-) -> str:
+def _status_bar_html(indexed_doc: str | None, stats: dict, reranker_on: bool) -> str:
     if not indexed_doc:
-        return (
-            '<div class="status-bar">'
-            '<span><span class="dot-red"></span>No document indexed</span>'
-            '</div>'
-        )
+        return '<div class="status-bar"><span><span class="dot-red"></span>No document indexed</span></div>'
     chunks = stats.get("chunks", "\u2014")
     nodes  = stats.get("nodes",  "\u2014")
     edges  = stats.get("edges",  "\u2014")
@@ -299,12 +310,7 @@ def _status_bar_html(
 
 
 def main() -> None:
-    st.set_page_config(
-        page_title="PDF Q&A",
-        page_icon="\U0001f4c4",
-        layout="wide",
-        initial_sidebar_state="expanded",
-    )
+    st.set_page_config(page_title="PDF Q&A", page_icon="\U0001f4c4", layout="wide", initial_sidebar_state="expanded")
     st.markdown(_CSS, unsafe_allow_html=True)
     _init_session()
     store, embedder = _get_shared_components()
@@ -314,19 +320,18 @@ def main() -> None:
         st.caption("Agentic document assistant \u00b7 bbox citation \u00b7 knowledge graph")
         if os.getenv("LANGCHAIN_TRACING_V2") == "true":
             st.caption("\U0001f50d LangSmith tracing on")
+        if _DBG:
+            st.caption("\U0001f41b DEBUG_PIPELINE=1 active")
         st.divider()
 
         provider = st.radio("Provider", ["ollama", "openai"], horizontal=True)
-        model_display = st.selectbox(
-            "Model",
-            _OLLAMA_MODELS if provider == "ollama" else _OPENAI_MODELS,
-        )
+        model_display = st.selectbox("Model", _OLLAMA_MODELS if provider == "ollama" else _OPENAI_MODELS)
         model = _resolve_model(model_display) if provider == "ollama" else model_display
 
         if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
             st.warning("OPENAI_API_KEY not set in .env")
         if provider == "ollama" and model_display in _LARGE_MODELS:
-            st.warning("\u26a0\ufe0f Large model — set ctx ≤ 2048 to avoid OOM.")
+            st.warning("\u26a0\ufe0f Large model \u2014 set ctx \u2264 2048 to avoid OOM.")
 
         st.divider()
         enable_reranker = st.toggle("Cross-encoder reranker", value=True)
@@ -334,7 +339,7 @@ def main() -> None:
             "Context window (tokens)",
             options=_CTX_OPTIONS,
             value=_DEFAULT_CTX,
-            help="Lower = less RAM. Use 2048 for Gemma4 to avoid OOM.",
+            help="Lower = less RAM. Use 2048 for Gemma4.",
         )
 
         st.divider()
@@ -344,22 +349,13 @@ def main() -> None:
             pdf_path.write_bytes(uploaded.read())
             with st.spinner("Indexing \u2014 extraction \u2192 chunks \u2192 embeddings \u2192 graph \u2026"):
                 _clear_index(store)
-                indexer = DocumentIndexer(
-                    embedder=embedder,
-                    store=store,
-                    llm_provider=provider,
-                    llm_model=model,
-                )
+                indexer = DocumentIndexer(embedder=embedder, store=store, llm_provider=provider, llm_model=model)
                 n = indexer.index(pdf_path)
                 doc_config: DocTypeConfig = indexer.last_doc_type or load_active_config()
 
             graph_path = store._persist_dir / "graph.json"
             kg = load_graph(graph_path)
-            st.session_state.index_stats = {
-                "chunks": n,
-                "nodes": kg.number_of_nodes(),
-                "edges": kg.number_of_edges(),
-            }
+            st.session_state.index_stats = {"chunks": n, "nodes": kg.number_of_nodes(), "edges": kg.number_of_edges()}
             st.session_state.indexed_doc     = pdf_path.stem
             st.session_state.doc_config      = doc_config
             st.session_state.active_provider = provider
@@ -389,14 +385,7 @@ def main() -> None:
             st.session_state.active_domain  = None
             st.rerun()
 
-    st.markdown(
-        _status_bar_html(
-            st.session_state.indexed_doc,
-            st.session_state.index_stats,
-            enable_reranker,
-        ),
-        unsafe_allow_html=True,
-    )
+    st.markdown(_status_bar_html(st.session_state.indexed_doc, st.session_state.index_stats, enable_reranker), unsafe_allow_html=True)
 
     chat_col, view_col = st.columns([3, 2], gap="large")
 
@@ -410,14 +399,9 @@ def main() -> None:
                     if msg["role"] == "assistant":
                         meta_parts = []
                         if msg.get("domain"):
-                            meta_parts.append(
-                                f'<span class="domain-badge">{msg["domain"]}</span>'
-                            )
+                            meta_parts.append(f'<span class="domain-badge">{msg["domain"]}</span>')
                         if msg.get("sources"):
-                            pills = "".join(
-                                f'<span class="source-pill">p.{s["page"]}</span>'
-                                for s in msg["sources"]
-                            )
+                            pills = "".join(f'<span class="source-pill">p.{s["page"]}</span>' for s in msg["sources"])
                             meta_parts.append(f'<span class="source-strip">{pills}</span>')
                         if meta_parts:
                             st.markdown(" ".join(meta_parts), unsafe_allow_html=True)
@@ -446,22 +430,21 @@ def main() -> None:
                             all_chunks=all_chunks,
                             num_ctx=ctx_limit,
                         )
-                        result = agent.invoke(
-                            {"messages": [HumanMessage(content=prompt)]}
-                        )
+                        result = agent.invoke({"messages": [HumanMessage(content=prompt)]})
                         answer = result["messages"][-1].content
 
                     st.markdown(answer)
                     sources = _extract_sources(result["messages"])
+                    if _DBG:
+                        logger.info("[DBG-CP7-FINAL] sources parsed: %d", len(sources))
+                        for s in sources:
+                            logger.info("[DBG-CP7-FINAL] source: page=%d  bboxes=%s  image_path=%r", s["page"], s["bboxes"], s["image_path"])
                     if sources:
                         pills_html = '<div class="source-strip">' + "".join(
                             f'<span class="source-pill">p.{s["page"]}</span>' for s in sources
                         ) + "</div>"
                         st.markdown(pills_html, unsafe_allow_html=True)
-                    st.markdown(
-                        f'<span class="domain-badge">{domain_spec.display_name}</span>',
-                        unsafe_allow_html=True,
-                    )
+                    st.markdown(f'<span class="domain-badge">{domain_spec.display_name}</span>', unsafe_allow_html=True)
 
                 st.session_state.latest_sources = sources
                 if sources:
@@ -492,10 +475,7 @@ def main() -> None:
             if img:
                 st.image(img, caption=f"Page {src['page']} \u2014 highlighted citation", use_container_width=True)
             else:
-                st.warning(
-                    f"Page image not found at `{src['image_path']}`. "
-                    "Re-index to regenerate page images."
-                )
+                st.warning(f"Page image not found at `{src['image_path']}`. Re-index to regenerate page images.")
             with st.expander("\U0001f4d0 Raw bounding boxes"):
                 st.json(src["bboxes"])
         else:
@@ -505,9 +485,9 @@ def main() -> None:
         if stats:
             st.divider()
             c1, c2, c3 = st.columns(3)
-            c1.metric("Chunks",       stats.get("chunks", "\u2014"))
-            c2.metric("Graph nodes",  stats.get("nodes",  "\u2014"))
-            c3.metric("Graph edges",  stats.get("edges",  "\u2014"))
+            c1.metric("Chunks",      stats.get("chunks", "\u2014"))
+            c2.metric("Graph nodes", stats.get("nodes",  "\u2014"))
+            c3.metric("Graph edges", stats.get("edges",  "\u2014"))
 
 
 if __name__ == "__main__":

@@ -1,20 +1,17 @@
 """LangGraph agent — two-phase call_model.
 
-Dual-model architecture (Jun 2026)
-------------------------------------
-Phase 1  (tool calling):   llm_tools  = qwen3.5:2b          — native tool-call support
-Phase 2  (answer gen):     llm_plain  = 4b-instruct variant  — better instruction following
+Dual-model architecture
+-----------------------
+Phase 1  (tool calling):  llm_tools = qwen3.5:2b          — native tool-call support
+Phase 2  (answer gen):    llm_plain = selected answer model — better instruction following
 
-This split avoids the problem where FieldMouse-AI/qwen3.5:4b-instruct
-(fine-tuned for instructions, not function-calling) would sometimes skip
-the tool call and answer directly from parametric knowledge.
-
-Other fixes present
---------------------
-- char_limit 12000: all chunks fit
-- Longest-first trim strategy
-- Language-aware answer prompt (DE/EN)
-- Bilingual Phase-1 system prompt
+Prompt design
+-------------
+- No 'Antwort:' / 'Answer:' completion cue: gemma4 chat template renders
+  this inside the user turn, causing the model to return empty. All models
+  start their response naturally after the HumanMessage.
+- Language-aware: DE question → DE prompt, EN question → EN prompt.
+- Bilingual Phase-1 system prompt so tool call fires for any language.
 """
 from __future__ import annotations
 
@@ -41,8 +38,6 @@ _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
 _ANSWER_NUM_PREDICT: int = 1024
-
-# Default tool-calling model: small, fast, native tool support
 _DEFAULT_TOOL_MODEL = "qwen3.5:2b"
 
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
@@ -53,13 +48,13 @@ _METADATA_RE = re.compile(
     re.DOTALL,
 )
 _SECTION_HEADER_RE = re.compile(
-    r"^GEFUNDENE ABSCHNITTE.*$|^--- Abschnitt \d+ ---$",
+    r"^FOUND SECTIONS.*$|^GEFUNDENE ABSCHNITTE.*$|^--- Abschnitt \d+ ---$",
     re.MULTILINE,
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 _DE_INDICATORS = re.compile(
-    r"\b(was|wie|wann|wo|wer|welch|warum|bitte|ist|sind|hat|haben|werden|kann|darf|muss|soll|gilt|steht|ab|bis|nach|vor|unter|gem\u00e4\u00df|vertrag|auftragnehmer|auftraggeber|leistung|verg\u00fcung|k\u00fcndigung|frist|zahlung)\b",
+    r"\b(was|wie|wann|wo|wer|welch|warum|bitte|ist|sind|hat|haben|werden|kann|darf|muss|soll|gilt|steht|ab|bis|nach|vor|unter|gem\u00e4\u00df|vertrag|auftragnehmer|auftraggeber|leistung|verg\u00fctung|k\u00fcndigung|frist|zahlung)\b",
     re.IGNORECASE,
 )
 
@@ -87,8 +82,9 @@ def _count_tool_calls(messages: list) -> int:
 
 
 def _split_tool_output(raw: str) -> list[str]:
+    # Split on section markers; keep the [source:...] metadata intact
     parts = re.split(r"--- Abschnitt \d+ ---", raw)
-    return [p.strip() for p in parts if p.strip() and not p.strip().startswith("GEFUNDENE")]
+    return [p.strip() for p in parts if p.strip() and not re.match(r"FOUND SECTIONS|GEFUNDENE ABSCHNITTE", p.strip())]
 
 
 def _get_tool_outputs(messages: list) -> list[str]:
@@ -101,6 +97,7 @@ def _get_tool_outputs(messages: list) -> list[str]:
 
 
 def _strip_chunk_metadata(text: str) -> str:
+    """Remove source/bbox/image_path lines from chunk text for LLM consumption."""
     cleaned = _METADATA_RE.sub("", text)
     cleaned = _SECTION_HEADER_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
@@ -126,32 +123,37 @@ def _get_last_human_question(messages: list) -> str | None:
 
 
 def _build_answer_prompt(question: str, ctx_text: str) -> str:
+    """Build the Phase-2 answer prompt.
+
+    No 'Antwort:' / 'Answer:' suffix — gemma4 chat template puts this
+    inside the user turn which causes an empty model response. All models
+    start their reply naturally after the closing instruction.
+    """
     lang = _detect_language(question)
     if lang == "de":
         return (
             "Du bist ein pr\u00e4ziser Vertragsanalyst. "
-            "Unten stehen Ausz\u00fcge aus einem Vertrag.\n"
-            "Beantworte die Frage ausschlie\u00dflich mit den Informationen aus den Ausz\u00fcgen, "
-            "die DIREKT die Frage beantworten.\n"
-            "Ignoriere Abschnitte, die nicht zur Frage passen.\n"
-            "Zahlen, Zeiten und Begriffe w\u00f6rtlich aus dem Text zitieren.\n"
-            "Wenn kein Abschnitt die Frage direkt beantwortet, schreibe: "
-            "'Die Antwort ist in den vorliegenden Ausz\u00fcgen nicht enthalten.'\n\n"
+            "Unten stehen Ausz\u00fcge aus einem Vertrag.\n\n"
+            "Regeln:\n"
+            "- Beantworte die Frage ausschlie\u00dflich mit Informationen aus den Ausz\u00fcgen.\n"
+            "- Zitiere Zahlen, Zeiten und Begriffe w\u00f6rtlich.\n"
+            "- Wenn kein Abschnitt die Frage direkt beantwortet: "
+            "'Die Antwort ist in den vorliegenden Ausz\u00fcgen nicht enthalten.'\n"
+            "- Fasse dich kurz und pr\u00e4zise.\n\n"
             f"Vertragsausz\u00fcge:\n{ctx_text}\n\n"
-            f"Frage: {question}\n"
-            "Antwort:"
+            f"Frage: {question}"
         )
     return (
         "You are a precise contract analyst. "
-        "Below are excerpts from a contract (which may be in German).\n"
-        "Answer the question using ONLY the information in the excerpts that directly addresses it.\n"
-        "Ignore sections that are not relevant to the question.\n"
-        "Quote numbers, dates, and terms verbatim from the text.\n"
-        "If no excerpt directly answers the question, write: "
-        "'The answer is not contained in the provided excerpts.'\n\n"
+        "Below are excerpts from a contract (text may be in German).\n\n"
+        "Rules:\n"
+        "- Answer using ONLY information from the excerpts.\n"
+        "- Quote numbers, dates, and terms verbatim.\n"
+        "- If no excerpt directly answers the question: "
+        "'The answer is not contained in the provided excerpts.'\n"
+        "- Be concise and precise.\n\n"
         f"Contract excerpts:\n{ctx_text}\n\n"
-        f"Question: {question}\n"
-        "Answer:"
+        f"Question: {question}"
     )
 
 
@@ -168,23 +170,14 @@ def build_agent(
     self_rag_bm25_gate: float = 0.5,
     num_ctx: int = _DEFAULT_NUM_CTX,
 ) -> Any:
-    """Build the two-phase LangGraph agent.
-
-    Args:
-        model:       Answer-generation model (Phase 2). Shown in UI as selected model.
-        tool_model:  Tool-calling model (Phase 1). Defaults to qwen3.5:2b.
-                     Pass None to use the same model for both phases.
-    """
     answer_model = model
     tc_model = tool_model if tool_model is not None else _DEFAULT_TOOL_MODEL
-    # For OpenAI, both phases use the same model (tool calling is native)
     if provider == "openai":
         tc_model = answer_model
 
     logger.info(
-        "Agent models — tool_caller=%s  answer=%s  (thinking_tc=%s  thinking_ans=%s)",
+        "Agent — tool_caller=%s  answer=%s",
         tc_model, answer_model,
-        _is_thinking_model(tc_model), _is_thinking_model(answer_model),
     )
 
     tools = build_tools(
@@ -196,20 +189,15 @@ def build_agent(
         self_rag_bm25_gate=self_rag_bm25_gate,
     )
     tool_node = ToolNode(tools)
-
-    # Phase 1: small model wired to tools
     llm_tools = _build_llm(provider, tc_model, num_ctx=num_ctx).bind_tools(tools)
-    # Phase 2: answer model, no tools, generous output budget
     llm_plain = _build_llm(provider, answer_model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
-
-    # /nothink suffix needed only when the tool-calling model is a thinking model
     no_think_tc = _is_thinking_model(tc_model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
         messages = state["messages"]
         tool_outputs = _get_tool_outputs(messages)
 
-        # ── Phase 2: we have retrieval results, generate the answer ──
+        # ── Phase 2: generate answer from retrieved chunks ──
         if tool_outputs:
             question = _get_last_human_question(messages) or ""
             trimmed = trim_retrieval_context(tool_outputs)
@@ -219,9 +207,8 @@ def build_agent(
             ctx_text = "\n\n---\n\n".join(c for c in clean_chunks if c)
             prompt = _build_answer_prompt(question, ctx_text)
             logger.info(
-                "Phase 2 (answer): model=%s  chunks=%d  ctx=%d chars  lang=%s  q=%.60s",
-                answer_model, len(clean_chunks), len(ctx_text),
-                _detect_language(question), question,
+                "Phase 2 (answer): model=%s  chunks=%d  ctx=%d chars  lang=%s",
+                answer_model, len(clean_chunks), len(ctx_text), _detect_language(question),
             )
             response = llm_plain.invoke([HumanMessage(content=prompt)])
             raw_content = response.content if isinstance(response.content, str) else ""
@@ -230,20 +217,20 @@ def build_agent(
                 response = response.model_copy(update={"content": answer})
             return {"messages": [response]}
 
-        # ── Phase 1: no tool results yet, call search_term ──
+        # ── Phase 1: call search_term tool ──
         system_prompt = (
-            "You are a contract analyst / Du bist ein Vertragsanalyst.\n"
-            "Call the search_term tool to find relevant contract sections. "
-            "Do NOT write an answer yourself — that happens automatically after the tool call.\n"
-            "Rufe search_term auf, um relevante Abschnitte zu finden. "
-            "Formuliere KEINE Antwort selbst."
+            "You are a contract analyst. "
+            "Call the search_term tool with a precise query to find relevant contract sections. "
+            "Do NOT answer the question yourself — always call the tool first.\n"
+            "Du bist ein Vertragsanalyst. "
+            "Rufe search_term mit einer pr\u00e4zisen Suchanfrage auf. "
+            "Beantworte die Frage NICHT selbst."
         )
         call_messages: list = [SystemMessage(content=system_prompt)]
         history = list(messages)
         if no_think_tc:
             history = _append_nothink(history)
         call_messages += history
-        logger.info("Phase 1 (tool call): model=%s  q=%.60s", tc_model, messages[-1].content if messages else "")
         return {"messages": [llm_tools.invoke(call_messages)]}
 
     def should_continue(state: AgentState) -> str:

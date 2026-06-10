@@ -34,25 +34,29 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Display name → actual Ollama model ID
-# UI shows friendly names; _MODEL_MAP translates before passing to build_agent/indexer.
 _MODEL_MAP: dict[str, str] = {
-    "qwen3.5:4b":  "FieldMouse-AI/qwen3.5:4b-instruct",  # 2.7 GB, instruct variant
-    "qwen3.5:2b":  "qwen3.5:2b",                          # 2.7 GB
-    "gemma4:e4b":  "gemma4:e4b-it-qat",                   # 6.1 GB
-    "gemma4:e2b":  "gemma4:e2b",                           # 7.2 GB
+    "qwen3.5:4b":  "FieldMouse-AI/qwen3.5:4b-instruct",
+    "qwen3.5:2b":  "qwen3.5:2b",
+    "gemma4:e4b":  "gemma4:e4b-it-qat",
+    "gemma4:e2b":  "gemma4:e2b",
 }
 _OLLAMA_MODELS = list(_MODEL_MAP.keys())
-_LARGE_MODELS = {"gemma4:e4b", "gemma4:e2b"}  # display names
+_LARGE_MODELS = {"gemma4:e4b", "gemma4:e2b"}
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
 _MAX_SOURCE_PILLS = 5
 _CTX_OPTIONS = [128, 256, 512, 1024, 2048, 4096]
 _DEFAULT_CTX = 2048
 
+# Regex to extract source metadata from ToolMessage content.
+# Handles: bboxes=[], bboxes=[[...]], bboxes=[x,y,x,y] (any list format)
+_SOURCE_RE = re.compile(
+    r"\[source: page (\d+), bboxes=(\[.*?\]), image_path=('(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\")",
+    re.DOTALL,
+)
+
 
 def _resolve_model(display_name: str) -> str:
-    """Translate UI display name to actual Ollama model ID."""
     return _MODEL_MAP.get(display_name, display_name)
 
 
@@ -243,27 +247,35 @@ def _clear_index(store: FAISSStore) -> None:
 
 
 def _extract_sources(messages: list) -> list[dict]:
+    """Parse [source: page N, bboxes=..., image_path=...] from ToolMessages.
+
+    Uses broadened regex that handles empty bboxes=[], flat lists, and
+    nested lists. Skips duplicate pages.
+    """
     sources: list[dict] = []
     seen: set[int] = set()
     for msg in messages:
         if not isinstance(msg, ToolMessage):
             continue
-        for m in re.finditer(
-            r"\[source: page (\d+), bboxes=(\[\[.*?\]\]), image_path=('.*?'|\".*?\")",
-            str(msg.content), re.DOTALL,
-        ):
+        for m in _SOURCE_RE.finditer(str(msg.content)):
             if len(sources) >= _MAX_SOURCE_PILLS:
                 break
             try:
                 page = int(m.group(1))
                 if page in seen:
                     continue
-                bboxes = ast.literal_eval(m.group(2))
+                bboxes_raw = m.group(2)
+                bboxes = ast.literal_eval(bboxes_raw)
+                # Normalise: flat [x,y,x,y] → [[x,y,x,y]], empty [] stays []
+                if bboxes and not isinstance(bboxes[0], list):
+                    bboxes = [bboxes]
                 image_path = ast.literal_eval(m.group(3))
                 if not image_path or not Path(image_path).exists():
                     fallback = OUTPUT_DIR / "pages" / f"page_{page:04d}.png"
                     if fallback.exists():
                         image_path = str(fallback)
+                if not image_path:
+                    continue  # no image — skip pill
                 sources.append({"page": page, "bboxes": bboxes, "image_path": image_path})
                 seen.add(page)
             except Exception:  # noqa: BLE001
@@ -284,19 +296,19 @@ def _status_bar_html(
             '<span><span class="dot-red"></span>No document indexed</span>'
             '</div>'
         )
-    chunks  = stats.get("chunks", "—")
-    nodes   = stats.get("nodes",  "—")
-    edges   = stats.get("edges",  "—")
-    kept    = self_rag_stats.get("kept",    "—")
-    dropped = self_rag_stats.get("dropped", "—")
+    chunks  = stats.get("chunks", "\u2014")
+    nodes   = stats.get("nodes",  "\u2014")
+    edges   = stats.get("edges",  "\u2014")
+    kept    = self_rag_stats.get("kept",    "\u2014")
+    dropped = self_rag_stats.get("dropped", "\u2014")
     rag_dot   = "dot-green"  if self_rag_enabled else "dot-yellow"
-    rag_label = f"Self-RAG ▸ {kept} kept / {dropped} dropped" if self_rag_enabled else "Self-RAG off"
+    rag_label = f"Self-RAG \u25b8 {kept} kept / {dropped} dropped" if self_rag_enabled else "Self-RAG off"
     reranker_dot = "dot-green" if reranker_on else "dot-yellow"
     return (
         '<div class="status-bar">'
         f'<span><span class="dot-green"></span><b>{indexed_doc}</b></span>'
-        f'<span>📦 {chunks} chunks</span>'
-        f'<span>🕸 {nodes} nodes · {edges} edges</span>'
+        f'<span>\U0001f4e6 {chunks} chunks</span>'
+        f'<span>\U0001f578 {nodes} nodes \u00b7 {edges} edges</span>'
         f'<span><span class="{rag_dot}"></span>{rag_label}</span>'
         f'<span><span class="{reranker_dot}"></span>Reranker {"on" if reranker_on else "off"}</span>'
         '</div>'
@@ -306,7 +318,7 @@ def _status_bar_html(
 def main() -> None:
     st.set_page_config(
         page_title="PDF Q&A",
-        page_icon="📄",
+        page_icon="\U0001f4c4",
         layout="wide",
         initial_sidebar_state="expanded",
     )
@@ -315,15 +327,13 @@ def main() -> None:
     store, embedder = _get_shared_components()
 
     with st.sidebar:
-        st.markdown("## 📄 PDF Q&A")
-        st.caption("Agentic document assistant · bbox citation · knowledge graph")
+        st.markdown("## \U0001f4c4 PDF Q&A")
+        st.caption("Agentic document assistant \u00b7 bbox citation \u00b7 knowledge graph")
         if os.getenv("LANGCHAIN_TRACING_V2") == "true":
-            st.caption("🔍 LangSmith tracing on")
+            st.caption("\U0001f50d LangSmith tracing on")
         st.divider()
 
         provider = st.radio("Provider", ["ollama", "openai"], horizontal=True)
-        # model_display holds the friendly name shown in the UI
-        # _resolve_model() maps it to the actual Ollama tag before use
         model_display = st.selectbox(
             "Model",
             _OLLAMA_MODELS if provider == "ollama" else _OPENAI_MODELS,
@@ -333,7 +343,7 @@ def main() -> None:
         if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
             st.warning("OPENAI_API_KEY not set in .env")
         if provider == "ollama" and model_display in _LARGE_MODELS:
-            st.warning("⚠️ Large model (6–10 GB). Set ctx=1024 to avoid OOM.")
+            st.warning("\u26a0\ufe0f Large model (6\u201310 GB). Set ctx=1024 to avoid OOM.")
 
         st.divider()
         enable_reranker = st.toggle("Cross-encoder reranker", value=True)
@@ -355,10 +365,10 @@ def main() -> None:
 
         st.divider()
         uploaded = st.file_uploader("Upload PDF", type="pdf")
-        if uploaded and st.button("⚡ Index document", type="primary", use_container_width=True):
+        if uploaded and st.button("\u26a1 Index document", type="primary", use_container_width=True):
             pdf_path = DATA_DIR / uploaded.name
             pdf_path.write_bytes(uploaded.read())
-            with st.spinner("Indexing — extraction → chunks → embeddings → graph …"):
+            with st.spinner("Indexing \u2014 extraction \u2192 chunks \u2192 embeddings \u2192 graph \u2026"):
                 _clear_index(store)
                 indexer = DocumentIndexer(
                     embedder=embedder,
@@ -379,13 +389,13 @@ def main() -> None:
             st.session_state.indexed_doc     = pdf_path.stem
             st.session_state.doc_config      = doc_config
             st.session_state.active_provider = provider
-            st.session_state.active_model    = model  # resolved ID stored
+            st.session_state.active_model    = model
             st.session_state.messages        = []
             st.session_state.overlay_source  = None
             st.session_state.latest_sources  = []
             st.session_state.self_rag_stats  = {}
             st.session_state.active_domain   = None
-            st.success(f"✅ {n} chunks indexed · {kg.number_of_nodes()} graph nodes")
+            st.success(f"\u2705 {n} chunks indexed \u00b7 {kg.number_of_nodes()} graph nodes")
             st.info(f"Doc type: **{doc_config.display_name}**")
 
         if st.session_state.indexed_doc:
@@ -394,12 +404,12 @@ def main() -> None:
             st.markdown(f"**Active:** `{st.session_state.indexed_doc}`")
             if doc_cfg:
                 domains = list(doc_cfg.domains.values())
-                st.caption("Domains: " + " · ".join(d.display_name for d in domains))
+                st.caption("Domains: " + " \u00b7 ".join(d.display_name for d in domains))
             if st.session_state.active_domain:
                 st.caption(f"Last domain: **{st.session_state.active_domain}**")
 
         st.divider()
-        if st.button("🗑 Clear conversation", use_container_width=True):
+        if st.button("\U0001f5d1 Clear conversation", use_container_width=True):
             st.session_state.messages       = []
             st.session_state.overlay_source = None
             st.session_state.latest_sources = []
@@ -422,7 +432,7 @@ def main() -> None:
 
     with chat_col:
         if not st.session_state.indexed_doc:
-            st.info("👈 Upload and index a PDF to start chatting.")
+            st.info("\U0001f448 Upload and index a PDF to start chatting.")
         else:
             for msg in st.session_state.messages:
                 with st.chat_message(msg["role"]):
@@ -442,7 +452,7 @@ def main() -> None:
                         if meta_parts:
                             st.markdown(" ".join(meta_parts), unsafe_allow_html=True)
 
-            if prompt := st.chat_input("Ask a question about the document …"):
+            if prompt := st.chat_input("Ask a question about the document \u2026"):
                 st.session_state.messages.append({"role": "user", "content": prompt})
                 with st.chat_message("user"):
                     st.markdown(prompt)
@@ -452,7 +462,7 @@ def main() -> None:
                 st.session_state.active_domain = domain_spec.display_name
 
                 with st.chat_message("assistant"):
-                    with st.spinner(f"Thinking · {domain_spec.display_name} …"):
+                    with st.spinner(f"Thinking \u00b7 {domain_spec.display_name} \u2026"):
                         retriever = _get_retriever(store, embedder, enable_reranker=enable_reranker)
                         graph_path = store._persist_dir / "graph.json"
                         kg = load_graph(graph_path)
@@ -498,7 +508,7 @@ def main() -> None:
                 st.rerun()
 
     with view_col:
-        st.markdown("#### 🔍 Source Viewer")
+        st.markdown("#### \U0001f50d Source Viewer")
         latest = st.session_state.latest_sources
         if latest:
             st.caption("Click a page to view highlighted source:")
@@ -513,13 +523,13 @@ def main() -> None:
         if src:
             img = render_page_with_bboxes(str(src["image_path"]), src["bboxes"])
             if img:
-                st.image(img, caption=f"Page {src['page']} — highlighted citation", use_container_width=True)
+                st.image(img, caption=f"Page {src['page']} \u2014 highlighted citation", use_container_width=True)
             else:
                 st.warning(
                     f"Page image not found at `{src['image_path']}`. "
                     "Re-index to regenerate page images."
                 )
-            with st.expander("📐 Raw bounding boxes"):
+            with st.expander("\U0001f4d0 Raw bounding boxes"):
                 st.json(src["bboxes"])
         else:
             st.info("Source pages appear here after a query.")
@@ -528,9 +538,9 @@ def main() -> None:
         if stats:
             st.divider()
             c1, c2, c3 = st.columns(3)
-            c1.metric("Chunks",       stats.get("chunks", "—"))
-            c2.metric("Graph nodes",  stats.get("nodes",  "—"))
-            c3.metric("Graph edges",  stats.get("edges",  "—"))
+            c1.metric("Chunks",       stats.get("chunks", "\u2014"))
+            c2.metric("Graph nodes",  stats.get("nodes",  "\u2014"))
+            c3.metric("Graph edges",  stats.get("edges",  "\u2014"))
 
 
 def _parse_self_rag_stats(messages: list) -> dict:

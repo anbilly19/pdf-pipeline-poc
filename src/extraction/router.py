@@ -1,17 +1,17 @@
 """Extraction router: Kreuzberg -> ODL -> PyMuPDF -> PyMuPDF-layout.
 
-Architecture
-------------
-    Primary:    KreuzbergExtractor       (Rust-speed, best text quality, no bboxes)
-    Secondary:  OpenDataLoaderExtractor  (Java 11, best table quality)
-    Tertiary:   PyMuPDF                  (always available, digital-born PDFs)
-    Quaternary: PyMuPDFLayoutExtractor   (CPU GNN, complex multi-column layouts)
-
 Bbox enrichment
 ---------------
-If the winning extractor produces pages with all-zero bboxes (e.g. Kreuzberg),
-the router runs a silent PyMuPDF pass *only* for bbox coordinates and stitches
-them onto the Kreuzberg elements. Text content is never replaced.
+Kreuzberg produces best-quality text but collapses each page into 1-2
+elements with no bbox information. After the primary extractor succeeds
+the router runs a silent PyMuPDF pass to get real block coordinates and
+stitches them onto the Kreuzberg elements:
+
+  - 1 Kreuzberg element  -> union of ALL PyMuPDF blocks on that page
+  - N Kreuzberg elements -> blocks split into N evenly-sized buckets;
+                            each element gets the union of its bucket
+
+Text content from Kreuzberg is never modified.
 """
 from __future__ import annotations
 
@@ -38,7 +38,6 @@ class RoutedPage:
 
 
 def _all_zero_bboxes(page: Page) -> bool:
-    """Return True if every element on this page has a zero/empty bbox."""
     if not page.elements:
         return False
     return all(
@@ -47,25 +46,29 @@ def _all_zero_bboxes(page: Page) -> bool:
     )
 
 
+def _union_bbox(bboxes: list[list[float]]) -> list[float]:
+    """Return the bounding union of a list of [x0,y0,x1,y1] boxes."""
+    valid = [b for b in bboxes if b and b != [0.0, 0.0, 0.0, 0.0]]
+    if not valid:
+        return [0.0, 0.0, 0.0, 0.0]
+    x0 = min(b[0] for b in valid)
+    y0 = min(b[1] for b in valid)
+    x1 = max(b[2] for b in valid)
+    y1 = max(b[3] for b in valid)
+    return [x0, y0, x1, y1]
+
+
 def _enrich_bboxes(
     pages: list[Page],
     pdf_path: Path,
     pymupdf: PyMuPDFExtractor,
 ) -> list[Page]:
-    """Overwrite zero bboxes on pages using a silent PyMuPDF pass.
+    """Fill zero bboxes using PyMuPDF block coordinates.
 
-    For each page where all elements have zero bboxes we extract the real
-    blocks via PyMuPDF and assign them positionally. If PyMuPDF returns a
-    different element count we spread block bboxes across elements as best
-    we can; text is never changed.
-
-    Args:
-        pages:    Pages from the primary extractor (Kreuzberg text quality).
-        pdf_path: Source PDF needed to open a fitz document.
-        pymupdf:  Shared PyMuPDFExtractor instance (avoids re-importing fitz).
-
-    Returns:
-        The same page list with bboxes filled in where possible.
+    Strategy per page:
+      - 1 Kreuzberg element  -> union of ALL PyMuPDF blocks (whole-page bbox)
+      - N Kreuzberg elements -> blocks split into N buckets by position;
+                                each element gets the union of its bucket
     """
     pages_needing_bboxes = [p for p in pages if _all_zero_bboxes(p)]
     if not pages_needing_bboxes:
@@ -89,10 +92,16 @@ def _enrich_bboxes(
         n_krz = len(page.elements)
         n_mu  = len(mu_bboxes)
 
-        for i, element in enumerate(page.elements):
-            # map element i -> nearest PyMuPDF block by proportional position
-            mu_idx = min(round(i * n_mu / n_krz), n_mu - 1)
-            element.bbox = mu_bboxes[mu_idx]
+        if n_krz == 1:
+            # Single blob -> cover the entire page content area
+            page.elements[0].bbox = _union_bbox(mu_bboxes)
+        else:
+            # Split PyMuPDF blocks into n_krz buckets by position
+            for i, element in enumerate(page.elements):
+                start = round(i * n_mu / n_krz)
+                end   = round((i + 1) * n_mu / n_krz)
+                bucket = mu_bboxes[start:end] or mu_bboxes[min(i, n_mu - 1):min(i, n_mu - 1) + 1]
+                element.bbox = _union_bbox(bucket)
 
         enriched += 1
         logger.debug(
@@ -113,7 +122,7 @@ class ExtractionRouter:
 
     def __init__(self, threshold: float = _DEFAULT_CONFIDENCE_THRESHOLD) -> None:
         self._threshold = threshold
-        self._pymupdf = PyMuPDFExtractor()   # kept for bbox enrichment
+        self._pymupdf = PyMuPDFExtractor()
         self._chain: list[tuple[BaseExtractor, str]] = self._build_chain()
 
     def _build_chain(self) -> list[tuple[BaseExtractor, str]]:
@@ -166,7 +175,6 @@ class ExtractionRouter:
                 "Ensure at least PyMuPDF is installed: uv add pymupdf"
             )
 
-        # --- Bbox enrichment: fill zero bboxes using PyMuPDF block coords ---
         primary_pages = _enrich_bboxes(primary_pages, pdf_path, self._pymupdf)
 
         routed: list[RoutedPage] = []

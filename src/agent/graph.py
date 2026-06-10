@@ -11,11 +11,11 @@ Key fixes (Jun 2026)
   concatenated). trim_retrieval_context received a list of 1 item that
   exceeded 4500 chars and returned [] — causing empty Dokumentauszüge.
   Fix: split on '--- Abschnitt' boundaries before trimming.
-- Switched to FieldMouse-AI/qwen3.5:4b-instruct — no thinking mode.
 - Phase-2 prompt tightened: model instructed to use ONLY the most
   directly relevant passage and ignore off-topic chunks.
-- _ANSWER_NUM_PREDICT raised to 512: 300 caused done_reason='length'
-  on gemma4:e2b which outputs more verbose responses.
+- _ANSWER_NUM_PREDICT raised to 1024: ensures gemma4:e2b and thinking
+  models have enough budget to produce a full answer.
+- Removed 2-sentence cap from prompt so answers are never truncated.
 """
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
-_ANSWER_NUM_PREDICT: int = 512  # 300 caused done_reason='length' on gemma4:e2b
+_ANSWER_NUM_PREDICT: int = 1024
 
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 _INSTRUCT_SUFFIXES = ("-instruct", ":instruct")
@@ -119,7 +119,7 @@ def _build_answer_prompt(question: str, ctx_text: str) -> str:
         f"Du bist ein pr\u00e4ziser Vertragsanalyst. Unten stehen Ausz\u00fcge aus einem Vertrag.\n"
         f"Beantworte die Frage ausschlie\u00dflich mit den Informationen, die DIREKT die Frage beantworten.\n"
         f"Ignoriere Abschnitte, die nicht zur Frage passen.\n"
-        f"Antworte in maximal 2 S\u00e4tzen. Zahlen, Zeiten und Begriffe w\u00f6rtlich aus dem Text zitieren.\n"
+        f"Zahlen, Zeiten, Seitenzahlen und Begriffe w\u00f6rtlich aus dem Text zitieren.\n"
         f"Wenn kein Abschnitt die Frage direkt beantwortet, schreibe: "
         f"'Die Antwort ist in den vorliegenden Ausz\u00fcgen nicht enthalten.'\n\n"
         f"Vertragsausz\u00fcge:\n{ctx_text}\n\n"

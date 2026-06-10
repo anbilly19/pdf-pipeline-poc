@@ -1,23 +1,23 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
+.venv/
+*.egg-info/
 dist/
 build/
-*.egg-info/
 
-# Data & outputs
-data/
+# Outputs & data
 outputs/
-*.pdf
-*.png
+data/
 
-# Chroma DB
-chroma_db/
+# Logs
+logs/
 
 # Env
 .env
 *.env
+
+# OS
+.DS_Store
+Thumbs.db

@@ -37,10 +37,10 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 # Display name → actual Ollama model ID
 # UI shows friendly names; _MODEL_MAP translates before passing to build_agent/indexer.
 _MODEL_MAP: dict[str, str] = {
-    "qwen3.5:4b":  "FieldMouse-AI/qwen3.5:4b-instruct",
-    "qwen3.5:2b":  "FieldMouse-AI/qwen3.5:2b-instruct",
-    "gemma4:e4b":  "gemma4:e4b",
-    "gemma4:e2b":  "gemma4:e2b",
+    "qwen3.5:4b":  "FieldMouse-AI/qwen3.5:4b-instruct",  # 2.7 GB, instruct variant
+    "qwen3.5:2b":  "qwen3.5:2b",                          # 2.7 GB
+    "gemma4:e4b":  "gemma4:e4b-it-qat",                   # 6.1 GB
+    "gemma4:e2b":  "gemma4:e2b",                           # 7.2 GB
 }
 _OLLAMA_MODELS = list(_MODEL_MAP.keys())
 _LARGE_MODELS = {"gemma4:e4b", "gemma4:e2b"}  # display names
@@ -198,7 +198,7 @@ def _init_session() -> None:
         "overlay_source": None,
         "latest_sources": [],
         "active_provider": "ollama",
-        "active_model": _OLLAMA_MODELS[0],
+        "active_model": _resolve_model(_OLLAMA_MODELS[0]),
         "doc_config": None,
         "active_domain": None,
         "index_stats": {},
@@ -322,7 +322,8 @@ def main() -> None:
         st.divider()
 
         provider = st.radio("Provider", ["ollama", "openai"], horizontal=True)
-        # model holds the display name; _resolve_model() maps it to the real Ollama ID
+        # model_display holds the friendly name shown in the UI
+        # _resolve_model() maps it to the actual Ollama tag before use
         model_display = st.selectbox(
             "Model",
             _OLLAMA_MODELS if provider == "ollama" else _OPENAI_MODELS,
@@ -332,7 +333,7 @@ def main() -> None:
         if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
             st.warning("OPENAI_API_KEY not set in .env")
         if provider == "ollama" and model_display in _LARGE_MODELS:
-            st.warning("⚠️ Large model (7–10 GB). Set ctx=1024 to avoid OOM.")
+            st.warning("⚠️ Large model (6–10 GB). Set ctx=1024 to avoid OOM.")
 
         st.divider()
         enable_reranker = st.toggle("Cross-encoder reranker", value=True)
@@ -349,7 +350,7 @@ def main() -> None:
             "Context window (tokens)",
             options=_CTX_OPTIONS,
             value=_DEFAULT_CTX,
-            help="Lower = less RAM. 2048 for qwen3.5 models, 1024 for Gemma4.",
+            help="Lower = less RAM. 2048 for qwen3.5, 1024 for Gemma4.",
         )
 
         st.divider()

@@ -2,16 +2,16 @@
 
 Dual-model architecture
 -----------------------
-Phase 1  (tool calling):  llm_tools = qwen3.5:2b
+Phase 1  (tool calling):  tc_model  — same as answer model UNLESS
+                          answer model is qwen3.5:4b-instruct, which
+                          lacks native tool support → fall back to qwen3.5:2b.
 Phase 2  (answer gen):    llm_plain = selected answer model
 
-Self-RAG removed — same-machine LLM calls during retrieval caused
-latency and occasional deadlocks. Pure FAISS+BM25+reranker pipeline.
+gemma4 variants handle tool calls natively — no proxy model needed.
 
 Prompt design
 -------------
-- No 'Antwort:'/'Answer:' completion cue: gemma4 renders this inside
-  the user turn causing empty responses.
+- No 'Antwort:'/'Answer:' completion cue.
 - Language-aware: DE → DE prompt, EN → EN prompt.
 - answer model has full num_predict=2048 budget.
 """
@@ -39,8 +39,11 @@ logger = logging.getLogger(__name__)
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
 _DEFAULT_NUM_CTX: int = 4096
 _ANSWER_NUM_PREDICT: int = 2048
-_DEFAULT_TOOL_MODEL = "qwen3.5:2b"
 MAX_TOOL_ITERATIONS: int = 4
+
+# Models that cannot call tools natively → proxy to qwen3.5:2b for Phase 1
+_NO_NATIVE_TOOL_MODELS = {"FieldMouse-AI/qwen3.5:4b-instruct"}
+_TOOL_PROXY_MODEL = "qwen3.5:2b"
 
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 _INSTRUCT_SUFFIXES = ("-instruct", ":instruct")
@@ -56,7 +59,7 @@ _SECTION_HEADER_RE = re.compile(
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 _DE_INDICATORS = re.compile(
-    r"\b(was|wie|wann|wo|wer|welch|warum|bitte|ist|sind|hat|haben|werden|kann|darf|muss|soll|gilt|steht|ab|bis|nach|vor|unter|gem\u00e4\u00df|vertrag|auftragnehmer|auftraggeber|leistung|verg\u00fctung|k\u00fcndigung|frist|zahlung)\b",
+    r"\b(was|wie|wann|wo|wer|welch|warum|bitte|ist|sind|hat|haben|werden|kann|darf|muss|soll|gilt|steht|ab|bis|nach|vor|unter|gemäß|vertrag|auftragnehmer|auftraggeber|leistung|vergütung|kündigung|frist|zahlung)\b",
     re.IGNORECASE,
 )
 
@@ -70,6 +73,29 @@ def _is_thinking_model(model: str) -> bool:
     if any(lower.endswith(s) for s in _INSTRUCT_SUFFIXES):
         return False
     return any(s in lower for s in _THINKING_MODEL_SUBSTRINGS)
+
+
+def _resolve_tool_model(answer_model: str, provider: str, tool_model: str | None) -> str:
+    """Return the model to use for Phase 1 (tool calling).
+
+    - If caller explicitly provides tool_model, honour it.
+    - OpenAI models handle tools natively — use answer_model.
+    - Models in _NO_NATIVE_TOOL_MODELS (qwen3.5:4b-instruct) cannot call
+      tools reliably → proxy to _TOOL_PROXY_MODEL (qwen3.5:2b).
+    - Everything else (gemma4 variants, qwen3.5:2b, …) handles tools
+      natively → use answer_model directly.
+    """
+    if tool_model is not None:
+        return tool_model
+    if provider == "openai":
+        return answer_model
+    if answer_model in _NO_NATIVE_TOOL_MODELS:
+        logger.info(
+            "Tool proxy: %s lacks native tool support → using %s for Phase 1",
+            answer_model, _TOOL_PROXY_MODEL,
+        )
+        return _TOOL_PROXY_MODEL
+    return answer_model
 
 
 def _strip_think(text: str) -> str:
@@ -129,15 +155,15 @@ def _build_answer_prompt(question: str, ctx_text: str) -> str:
     lang = _detect_language(question)
     if lang == "de":
         return (
-            "Du bist ein pr\u00e4ziser Vertragsanalyst. "
-            "Unten stehen Ausz\u00fcge aus einem Vertrag.\n\n"
+            "Du bist ein präziser Vertragsanalyst. "
+            "Unten stehen Auszüge aus einem Vertrag.\n\n"
             "Regeln:\n"
-            "- Beantworte die Frage ausschlie\u00dflich mit Informationen aus den Ausz\u00fcgen.\n"
-            "- Zitiere Zahlen, Zeiten und Begriffe w\u00f6rtlich.\n"
+            "- Beantworte die Frage ausschließlich mit Informationen aus den Auszügen.\n"
+            "- Zitiere Zahlen, Zeiten und Begriffe wörtlich.\n"
             "- Wenn kein Abschnitt die Frage direkt beantwortet: "
-            "'Die Antwort ist in den vorliegenden Ausz\u00fcgen nicht enthalten.'\n"
-            "- Fasse dich kurz und pr\u00e4zise.\n\n"
-            f"Vertragsausz\u00fcge:\n{ctx_text}\n\n"
+            "'Die Antwort ist in den vorliegenden Auszügen nicht enthalten.'\n"
+            "- Fasse dich kurz und präzise.\n\n"
+            f"Vertragsauszüge:\n{ctx_text}\n\n"
             f"Frage: {question}"
         )
     return (
@@ -168,9 +194,7 @@ def build_agent(
     num_ctx: int = _DEFAULT_NUM_CTX,
 ) -> Any:
     answer_model = model
-    tc_model = tool_model if tool_model is not None else _DEFAULT_TOOL_MODEL
-    if provider == "openai":
-        tc_model = answer_model
+    tc_model = _resolve_tool_model(answer_model, provider, tool_model)
 
     logger.info("Agent — tool_caller=%s  answer=%s", tc_model, answer_model)
 
@@ -208,7 +232,7 @@ def build_agent(
             "Call the search_term tool with a precise query to find relevant contract sections. "
             "Do NOT answer the question yourself — always call the tool first.\n"
             "Du bist ein Vertragsanalyst. "
-            "Rufe search_term mit einer pr\u00e4zisen Suchanfrage auf. "
+            "Rufe search_term mit einer präzisen Suchanfrage auf. "
             "Beantworte die Frage NICHT selbst."
         )
         call_messages: list = [SystemMessage(content=system_prompt)]
@@ -258,6 +282,4 @@ def _build_llm(
     if _is_thinking_model(model):
         return ChatOllama(**base_kwargs, temperature=0.6, top_p=0.9, top_k=20)
 
-    # gemma4 and instruct models: slightly raised temperature for more
-    # natural, complete responses instead of cut-off answers
     return ChatOllama(**base_kwargs, temperature=0.1)

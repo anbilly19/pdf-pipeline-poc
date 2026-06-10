@@ -1,20 +1,20 @@
 """LangGraph agent — two-phase call_model.
 
-Phase 1 (no ToolMessage yet): agent calls search_term.
-Phase 2 (ToolMessage in history): extract chunks, build answer prompt,
-        call llm_plain once. Language of the question is detected and
-        the prompt is written in the same language.
+Dual-model architecture (Jun 2026)
+------------------------------------
+Phase 1  (tool calling):   llm_tools  = qwen3.5:2b          — native tool-call support
+Phase 2  (answer gen):     llm_plain  = 4b-instruct variant  — better instruction following
 
-Key fixes (Jun 2026)
+This split avoids the problem where FieldMouse-AI/qwen3.5:4b-instruct
+(fine-tuned for instructions, not function-calling) would sometimes skip
+the tool call and answer directly from parametric knowledge.
+
+Other fixes present
 --------------------
-- char_limit raised to 12000: all 23 chunks now fit, no relevant
-  content discarded.
-- trim strategy changed: keeps highest-content (longest) chunks instead
-  of most-recent, preventing early-document sections from being dropped.
-- Language detection: English questions now get an English prompt so
-  'When must...' queries are answered correctly.
-- Bilingual Phase-1 system prompt so tool call fires for any language.
-- _ANSWER_NUM_PREDICT 1024: enough budget for verbose models.
+- char_limit 12000: all chunks fit
+- Longest-first trim strategy
+- Language-aware answer prompt (DE/EN)
+- Bilingual Phase-1 system prompt
 """
 from __future__ import annotations
 
@@ -42,6 +42,9 @@ _DEFAULT_NUM_CTX: int = 2048
 MAX_TOOL_ITERATIONS: int = 4
 _ANSWER_NUM_PREDICT: int = 1024
 
+# Default tool-calling model: small, fast, native tool support
+_DEFAULT_TOOL_MODEL = "qwen3.5:2b"
+
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 _INSTRUCT_SUFFIXES = ("-instruct", ":instruct")
 
@@ -55,15 +58,13 @@ _SECTION_HEADER_RE = re.compile(
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
-# German indicator words — if any appear in the question, use DE prompt
 _DE_INDICATORS = re.compile(
-    r"\b(was|wie|wann|wo|wer|welch|warum|bitte|ist|sind|hat|haben|werden|kann|darf|muss|soll|gilt|steht|ab|bis|nach|vor|unter|gem\u00e4\u00df|vertrag|auftragnehmer|auftraggeber|leistung|vergütung|k\u00fcndigung|frist|zahlung)\b",
+    r"\b(was|wie|wann|wo|wer|welch|warum|bitte|ist|sind|hat|haben|werden|kann|darf|muss|soll|gilt|steht|ab|bis|nach|vor|unter|gem\u00e4\u00df|vertrag|auftragnehmer|auftraggeber|leistung|verg\u00fcung|k\u00fcndigung|frist|zahlung)\b",
     re.IGNORECASE,
 )
 
 
 def _detect_language(text: str) -> str:
-    """Return 'de' if the text looks German, else 'en'."""
     return "de" if _DE_INDICATORS.search(text) else "en"
 
 
@@ -128,19 +129,18 @@ def _build_answer_prompt(question: str, ctx_text: str) -> str:
     lang = _detect_language(question)
     if lang == "de":
         return (
-            "Du bist ein präziser Vertragsanalyst. "
-            "Unten stehen Auszüge aus einem Vertrag.\n"
-            "Beantworte die Frage ausschließlich mit den Informationen aus den Auszügen, "
+            "Du bist ein pr\u00e4ziser Vertragsanalyst. "
+            "Unten stehen Ausz\u00fcge aus einem Vertrag.\n"
+            "Beantworte die Frage ausschlie\u00dflich mit den Informationen aus den Ausz\u00fcgen, "
             "die DIREKT die Frage beantworten.\n"
             "Ignoriere Abschnitte, die nicht zur Frage passen.\n"
-            "Zahlen, Zeiten und Begriffe wörtlich aus dem Text zitieren.\n"
+            "Zahlen, Zeiten und Begriffe w\u00f6rtlich aus dem Text zitieren.\n"
             "Wenn kein Abschnitt die Frage direkt beantwortet, schreibe: "
-            "'Die Antwort ist in den vorliegenden Auszügen nicht enthalten.'\n\n"
-            f"Vertragsauszüge:\n{ctx_text}\n\n"
+            "'Die Antwort ist in den vorliegenden Ausz\u00fcgen nicht enthalten.'\n\n"
+            f"Vertragsausz\u00fcge:\n{ctx_text}\n\n"
             f"Frage: {question}\n"
             "Antwort:"
         )
-    # English fallback
     return (
         "You are a precise contract analyst. "
         "Below are excerpts from a contract (which may be in German).\n"
@@ -159,6 +159,7 @@ def build_agent(
     retriever: BBoxRetriever,
     provider: str = "ollama",
     model: str = "FieldMouse-AI/qwen3.5:4b-instruct",
+    tool_model: str | None = None,
     domain_spec: DomainSpec | None = None,
     graph: object = None,
     all_chunks: list[Chunk] | None = None,
@@ -167,24 +168,48 @@ def build_agent(
     self_rag_bm25_gate: float = 0.5,
     num_ctx: int = _DEFAULT_NUM_CTX,
 ) -> Any:
+    """Build the two-phase LangGraph agent.
+
+    Args:
+        model:       Answer-generation model (Phase 2). Shown in UI as selected model.
+        tool_model:  Tool-calling model (Phase 1). Defaults to qwen3.5:2b.
+                     Pass None to use the same model for both phases.
+    """
+    answer_model = model
+    tc_model = tool_model if tool_model is not None else _DEFAULT_TOOL_MODEL
+    # For OpenAI, both phases use the same model (tool calling is native)
+    if provider == "openai":
+        tc_model = answer_model
+
+    logger.info(
+        "Agent models — tool_caller=%s  answer=%s  (thinking_tc=%s  thinking_ans=%s)",
+        tc_model, answer_model,
+        _is_thinking_model(tc_model), _is_thinking_model(answer_model),
+    )
+
     tools = build_tools(
         retriever,
         graph=graph,
         all_chunks=all_chunks,
-        self_rag_model=model,
+        self_rag_model=answer_model,
         self_rag_enabled=self_rag_enabled,
         self_rag_bm25_gate=self_rag_bm25_gate,
     )
     tool_node = ToolNode(tools)
-    llm_with_tools = _build_llm(provider, model, num_ctx=num_ctx).bind_tools(tools)
-    llm_plain = _build_llm(provider, model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
-    logger.info("Agent model: %s (thinking=%s)", model, _is_thinking_model(model))
-    no_think = _is_thinking_model(model)
+
+    # Phase 1: small model wired to tools
+    llm_tools = _build_llm(provider, tc_model, num_ctx=num_ctx).bind_tools(tools)
+    # Phase 2: answer model, no tools, generous output budget
+    llm_plain = _build_llm(provider, answer_model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
+
+    # /nothink suffix needed only when the tool-calling model is a thinking model
+    no_think_tc = _is_thinking_model(tc_model)
 
     def call_model(state: AgentState) -> dict:  # type: ignore[type-arg]
         messages = state["messages"]
         tool_outputs = _get_tool_outputs(messages)
 
+        # ── Phase 2: we have retrieval results, generate the answer ──
         if tool_outputs:
             question = _get_last_human_question(messages) or ""
             trimmed = trim_retrieval_context(tool_outputs)
@@ -193,19 +218,19 @@ def build_agent(
             clean_chunks = [_strip_chunk_metadata(t) for t in trimmed]
             ctx_text = "\n\n---\n\n".join(c for c in clean_chunks if c)
             prompt = _build_answer_prompt(question, ctx_text)
-            msg = HumanMessage(content=prompt)
             logger.info(
-                "Final-answer phase: %d chunks, ctx ~%d chars, lang=%s, question=%.60s",
-                len(clean_chunks), len(ctx_text), _detect_language(question), question,
+                "Phase 2 (answer): model=%s  chunks=%d  ctx=%d chars  lang=%s  q=%.60s",
+                answer_model, len(clean_chunks), len(ctx_text),
+                _detect_language(question), question,
             )
-            response = llm_plain.invoke([msg])
+            response = llm_plain.invoke([HumanMessage(content=prompt)])
             raw_content = response.content if isinstance(response.content, str) else ""
             answer = _strip_think(raw_content)
             if answer != raw_content:
                 response = response.model_copy(update={"content": answer})
             return {"messages": [response]}
 
-        # Phase 1 — bilingual so tool call fires for any question language
+        # ── Phase 1: no tool results yet, call search_term ──
         system_prompt = (
             "You are a contract analyst / Du bist ein Vertragsanalyst.\n"
             "Call the search_term tool to find relevant contract sections. "
@@ -215,10 +240,11 @@ def build_agent(
         )
         call_messages: list = [SystemMessage(content=system_prompt)]
         history = list(messages)
-        if no_think:
+        if no_think_tc:
             history = _append_nothink(history)
         call_messages += history
-        return {"messages": [llm_with_tools.invoke(call_messages)]}
+        logger.info("Phase 1 (tool call): model=%s  q=%.60s", tc_model, messages[-1].content if messages else "")
+        return {"messages": [llm_tools.invoke(call_messages)]}
 
     def should_continue(state: AgentState) -> str:
         last = state["messages"][-1]

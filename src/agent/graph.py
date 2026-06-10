@@ -1,21 +1,20 @@
 """LangGraph agent — two-phase call_model.
 
 Phase 1 (no ToolMessage yet): agent calls search_term.
-Phase 2 (ToolMessage in history): extract chunks, build fill-in-the-blank
-        prompt, call llm_plain once with hard context limit.
-        Model completes 'Antwort:' inline.
+Phase 2 (ToolMessage in history): extract chunks, build answer prompt,
+        call llm_plain once. Language of the question is detected and
+        the prompt is written in the same language.
 
 Key fixes (Jun 2026)
 --------------------
-- Tool output arrives as ONE giant string per ToolMessage (all 23 chunks
-  concatenated). trim_retrieval_context received a list of 1 item that
-  exceeded 4500 chars and returned [] — causing empty Dokumentauszüge.
-  Fix: split on '--- Abschnitt' boundaries before trimming.
-- Phase-2 prompt tightened: model instructed to use ONLY the most
-  directly relevant passage and ignore off-topic chunks.
-- _ANSWER_NUM_PREDICT raised to 1024: ensures gemma4:e2b and thinking
-  models have enough budget to produce a full answer.
-- Removed 2-sentence cap from prompt so answers are never truncated.
+- char_limit raised to 12000: all 23 chunks now fit, no relevant
+  content discarded.
+- trim strategy changed: keeps highest-content (longest) chunks instead
+  of most-recent, preventing early-document sections from being dropped.
+- Language detection: English questions now get an English prompt so
+  'When must...' queries are answered correctly.
+- Bilingual Phase-1 system prompt so tool call fires for any language.
+- _ANSWER_NUM_PREDICT 1024: enough budget for verbose models.
 """
 from __future__ import annotations
 
@@ -55,6 +54,17 @@ _SECTION_HEADER_RE = re.compile(
     re.MULTILINE,
 )
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+# German indicator words — if any appear in the question, use DE prompt
+_DE_INDICATORS = re.compile(
+    r"\b(was|wie|wann|wo|wer|welch|warum|bitte|ist|sind|hat|haben|werden|kann|darf|muss|soll|gilt|steht|ab|bis|nach|vor|unter|gem\u00e4\u00df|vertrag|auftragnehmer|auftraggeber|leistung|vergütung|k\u00fcndigung|frist|zahlung)\b",
+    re.IGNORECASE,
+)
+
+
+def _detect_language(text: str) -> str:
+    """Return 'de' if the text looks German, else 'en'."""
+    return "de" if _DE_INDICATORS.search(text) else "en"
 
 
 def _is_thinking_model(model: str) -> bool:
@@ -115,16 +125,33 @@ def _get_last_human_question(messages: list) -> str | None:
 
 
 def _build_answer_prompt(question: str, ctx_text: str) -> str:
+    lang = _detect_language(question)
+    if lang == "de":
+        return (
+            "Du bist ein präziser Vertragsanalyst. "
+            "Unten stehen Auszüge aus einem Vertrag.\n"
+            "Beantworte die Frage ausschließlich mit den Informationen aus den Auszügen, "
+            "die DIREKT die Frage beantworten.\n"
+            "Ignoriere Abschnitte, die nicht zur Frage passen.\n"
+            "Zahlen, Zeiten und Begriffe wörtlich aus dem Text zitieren.\n"
+            "Wenn kein Abschnitt die Frage direkt beantwortet, schreibe: "
+            "'Die Antwort ist in den vorliegenden Auszügen nicht enthalten.'\n\n"
+            f"Vertragsauszüge:\n{ctx_text}\n\n"
+            f"Frage: {question}\n"
+            "Antwort:"
+        )
+    # English fallback
     return (
-        f"Du bist ein pr\u00e4ziser Vertragsanalyst. Unten stehen Ausz\u00fcge aus einem Vertrag.\n"
-        f"Beantworte die Frage ausschlie\u00dflich mit den Informationen, die DIREKT die Frage beantworten.\n"
-        f"Ignoriere Abschnitte, die nicht zur Frage passen.\n"
-        f"Zahlen, Zeiten, Seitenzahlen und Begriffe w\u00f6rtlich aus dem Text zitieren.\n"
-        f"Wenn kein Abschnitt die Frage direkt beantwortet, schreibe: "
-        f"'Die Antwort ist in den vorliegenden Ausz\u00fcgen nicht enthalten.'\n\n"
-        f"Vertragsausz\u00fcge:\n{ctx_text}\n\n"
-        f"Frage: {question}\n"
-        f"Antwort:"
+        "You are a precise contract analyst. "
+        "Below are excerpts from a contract (which may be in German).\n"
+        "Answer the question using ONLY the information in the excerpts that directly addresses it.\n"
+        "Ignore sections that are not relevant to the question.\n"
+        "Quote numbers, dates, and terms verbatim from the text.\n"
+        "If no excerpt directly answers the question, write: "
+        "'The answer is not contained in the provided excerpts.'\n\n"
+        f"Contract excerpts:\n{ctx_text}\n\n"
+        f"Question: {question}\n"
+        "Answer:"
     )
 
 
@@ -162,14 +189,14 @@ def build_agent(
             question = _get_last_human_question(messages) or ""
             trimmed = trim_retrieval_context(tool_outputs)
             if not trimmed:
-                trimmed = tool_outputs[:3]
+                trimmed = tool_outputs[:5]
             clean_chunks = [_strip_chunk_metadata(t) for t in trimmed]
-            ctx_text = "\n\n".join(c for c in clean_chunks if c)
+            ctx_text = "\n\n---\n\n".join(c for c in clean_chunks if c)
             prompt = _build_answer_prompt(question, ctx_text)
             msg = HumanMessage(content=prompt)
             logger.info(
-                "Final-answer phase: %d chunks, ctx ~%d chars, question=%.60s",
-                len(clean_chunks), len(ctx_text), question,
+                "Final-answer phase: %d chunks, ctx ~%d chars, lang=%s, question=%.60s",
+                len(clean_chunks), len(ctx_text), _detect_language(question), question,
             )
             response = llm_plain.invoke([msg])
             raw_content = response.content if isinstance(response.content, str) else ""
@@ -178,10 +205,13 @@ def build_agent(
                 response = response.model_copy(update={"content": answer})
             return {"messages": [response]}
 
+        # Phase 1 — bilingual so tool call fires for any question language
         system_prompt = (
-            "Du bist ein Vertragsanalyst. "
+            "You are a contract analyst / Du bist ein Vertragsanalyst.\n"
+            "Call the search_term tool to find relevant contract sections. "
+            "Do NOT write an answer yourself — that happens automatically after the tool call.\n"
             "Rufe search_term auf, um relevante Abschnitte zu finden. "
-            "Formuliere KEINE Antwort selbst — das passiert nach dem Tool-Aufruf automatisch."
+            "Formuliere KEINE Antwort selbst."
         )
         call_messages: list = [SystemMessage(content=system_prompt)]
         history = list(messages)

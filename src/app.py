@@ -34,23 +34,27 @@ DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
-# Models currently installed on this machine.
-# qwen3.5:4b  — 3.4 GB, primary default, strong tool calling + German
-# qwen3.5:2b  — 2.7 GB, lightweight fallback, fits easily in 5 GB free RAM
-# gemma4:e4b  — 9.6 GB, use ctx=1024 only or expect OOM
-# gemma4:e2b  — 7.2 GB, same caveat
-_OLLAMA_MODELS = [
-    "qwen3.5:4b",   # primary default
-    "qwen3.5:2b",   # lightweight fallback
-    "gemma4:e4b",   # large — use ctx=1024 only
-    "gemma4:e2b",   # large — use ctx=1024 only
-]
-_LARGE_MODELS = {"gemma4:e4b", "gemma4:e2b"}
+# Display name → actual Ollama model ID
+# UI shows friendly names; _MODEL_MAP translates before passing to build_agent/indexer.
+_MODEL_MAP: dict[str, str] = {
+    "qwen3.5:4b":  "FieldMouse-AI/qwen3.5:4b-instruct",
+    "qwen3.5:2b":  "FieldMouse-AI/qwen3.5:2b-instruct",
+    "gemma4:e4b":  "gemma4:e4b",
+    "gemma4:e2b":  "gemma4:e2b",
+}
+_OLLAMA_MODELS = list(_MODEL_MAP.keys())
+_LARGE_MODELS = {"gemma4:e4b", "gemma4:e2b"}  # display names
 _OPENAI_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1-mini", "gpt-4.1"]
 _DEFAULT_TOP_K = 15
 _MAX_SOURCE_PILLS = 5
-_CTX_OPTIONS = [128,256,512,1024, 2048, 4096]
+_CTX_OPTIONS = [128, 256, 512, 1024, 2048, 4096]
 _DEFAULT_CTX = 2048
+
+
+def _resolve_model(display_name: str) -> str:
+    """Translate UI display name to actual Ollama model ID."""
+    return _MODEL_MAP.get(display_name, display_name)
+
 
 _CSS = """
 <style>
@@ -318,13 +322,16 @@ def main() -> None:
         st.divider()
 
         provider = st.radio("Provider", ["ollama", "openai"], horizontal=True)
-        model = st.selectbox(
+        # model holds the display name; _resolve_model() maps it to the real Ollama ID
+        model_display = st.selectbox(
             "Model",
             _OLLAMA_MODELS if provider == "ollama" else _OPENAI_MODELS,
         )
+        model = _resolve_model(model_display) if provider == "ollama" else model_display
+
         if provider == "openai" and not os.getenv("OPENAI_API_KEY"):
             st.warning("OPENAI_API_KEY not set in .env")
-        if provider == "ollama" and model in _LARGE_MODELS:
+        if provider == "ollama" and model_display in _LARGE_MODELS:
             st.warning("⚠️ Large model (7–10 GB). Set ctx=1024 to avoid OOM.")
 
         st.divider()
@@ -368,10 +375,10 @@ def main() -> None:
                 "nodes": kg.number_of_nodes(),
                 "edges": kg.number_of_edges(),
             }
-            st.session_state.indexed_doc   = pdf_path.stem
-            st.session_state.doc_config    = doc_config
+            st.session_state.indexed_doc     = pdf_path.stem
+            st.session_state.doc_config      = doc_config
             st.session_state.active_provider = provider
-            st.session_state.active_model    = model
+            st.session_state.active_model    = model  # resolved ID stored
             st.session_state.messages        = []
             st.session_state.overlay_source  = None
             st.session_state.latest_sources  = []

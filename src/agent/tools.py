@@ -14,7 +14,6 @@ from src.retrieval.retriever import BBoxRetriever
 
 logger = logging.getLogger(__name__)
 
-# Reduced from 10 — fewer, higher-quality chunks beat more noisy ones
 _TOP_K = 8
 
 
@@ -44,17 +43,14 @@ def build_tools(
     retriever: BBoxRetriever,
     graph: object = None,
     all_chunks: list[Chunk] | None = None,
-    self_rag_model: str = "gemma4:e2b",
-    self_rag_enabled: bool = True,
-    self_rag_bm25_gate: float = 0.5,
+    self_rag_model: str = "gemma4:e2b",   # kept for API compat, unused
+    self_rag_enabled: bool = False,         # unused — Self-RAG removed
+    self_rag_bm25_gate: float = 0.5,        # unused
 ) -> list[object]:
-    from src.agent.self_rag import ScoredChunk, make_self_rag_filter  # noqa: PLC0415
+    """Build LangChain tools wired to the retrieval stack.
 
-    _rag_filter = make_self_rag_filter(
-        model=self_rag_model,
-        bm25_gate=self_rag_bm25_gate,
-        enabled=self_rag_enabled,
-    )
+    Self-RAG has been removed. Retrieval is purely FAISS+BM25+reranker.
+    """
     _graph_enabled = graph is not None and all_chunks is not None
 
     def _expand(chunks: list[Chunk]) -> list[Chunk]:
@@ -66,21 +62,6 @@ def build_tools(
         except Exception as exc:  # noqa: BLE001
             logger.warning("Graph expansion failed (non-fatal): %s", exc)
             return chunks
-
-    def _self_rag_filter(query: str, chunks: list[Chunk]) -> list[Chunk]:
-        """Run Self-RAG; on failure or all-filtered, return top-3 by original rank."""
-        try:
-            scored = [ScoredChunk(chunk=c, bm25_score=0.0) for c in chunks]
-            results = _rag_filter.filter(query, scored)
-            kept = [r.chunk for r in results]
-            if not kept:
-                # Return top-3 best-ranked originals rather than the full list
-                logger.info("Self-RAG filtered all — falling back to top-3 originals")
-                return chunks[:3]
-            return kept
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Self-RAG filter error (non-fatal): %s", exc)
-            return chunks[:3]
 
     @tool
     def search_term(
@@ -95,7 +76,6 @@ def build_tools(
         if not chunks:
             return NO_RESULTS
         chunks = _expand(chunks)
-        chunks = _self_rag_filter(query, chunks)
 
         parts = [f"FOUND SECTIONS ({len(chunks)} total — read all):\n"]
         for i, c in enumerate(chunks, 1):
@@ -118,8 +98,7 @@ def build_tools(
             chunks = retriever.retrieve(query, top_k=3)
         if not chunks:
             return NO_TABLE
-
-        best: Chunk = chunks[0]
+        best = chunks[0]
         result = ToolResult(
             content=_markdown_table_to_csv(best.text),
             bboxes=best.bboxes,
@@ -137,7 +116,6 @@ def build_tools(
         if not chunks:
             return NO_SECTION
         chunks = _expand(chunks)
-
         combined = "\n\n".join(c.text for c in chunks)
         all_bboxes = [bbox for c in chunks for bbox in c.bboxes]
         result = ToolResult(
@@ -158,7 +136,6 @@ def build_tools(
         page_chunks = [c for c in chunks if c.page_number == page_number] or chunks[:3]
         if not page_chunks:
             return NO_REGION
-
         all_bboxes = [bbox for c in page_chunks for bbox in c.bboxes]
         result = ToolResult(
             content=f"Highlighted region on page {page_number}",
@@ -168,64 +145,7 @@ def build_tools(
         )
         return str(result)
 
-    @tool
-    def rerank_and_filter(
-        query: Annotated[str, "Search query to retrieve and filter sections"],
-        top_k: Annotated[int, "Max sections after filter (1-8)"] = 4,
-    ) -> str:
-        """Retrieve, rerank, then Self-RAG filter for highest precision.
-
-        Use when search_term returns too many borderline results.
-        """
-        top_k = max(1, min(top_k, 8))
-        chunks = retriever.retrieve(query, top_k=_TOP_K)
-        if not chunks:
-            return NO_RESULTS
-        chunks = _expand(chunks)
-        chunks = _self_rag_filter(query, chunks)
-        chunks = chunks[:top_k]
-
-        parts = [f"FILTERED SECTIONS (top {len(chunks)}, Self-RAG verified):\n"]
-        for i, c in enumerate(chunks, 1):
-            result = ToolResult(
-                content=c.text,
-                bboxes=c.bboxes,
-                page_number=c.page_number,
-                image_path=c.image_path,
-            )
-            parts.append(f"--- Abschnitt {i} ---\n{result}")
-        return "\n\n".join(parts)
-
-    @tool
-    def verify_relevance(
-        query: Annotated[str, "The question or query"],
-        chunk_text: Annotated[str, "The text chunk to check"],
-    ) -> str:
-        """Check whether a single text chunk is relevant to the query."""
-        from src.models import Chunk as _Chunk  # noqa: PLC0415
-        dummy = _Chunk(
-            text=chunk_text,
-            page_number=0,
-            bboxes=[],
-            chunk_type="text",
-            confidence=1.0,
-            image_path="",
-        )
-        result = _rag_filter.check_one(query=query, chunk=dummy, bm25_score=0.0)
-        return (
-            f"relevant={result.is_relevant} | "
-            f"score={result.score:.2f} | "
-            f"reason={result.reason!r}"
-        )
-
-    return [
-        search_term,
-        extract_table_to_csv,
-        summarize_section,
-        highlight_section,
-        rerank_and_filter,
-        verify_relevance,
-    ]
+    return [search_term, extract_table_to_csv, summarize_section, highlight_section]
 
 
 def _markdown_table_to_csv(text: str) -> str:
@@ -236,7 +156,6 @@ def _markdown_table_to_csv(text: str) -> str:
     ]
     if not table_lines:
         return text
-
     output = io.StringIO()
     writer = csv.writer(output)
     for line in table_lines:

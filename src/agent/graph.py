@@ -2,16 +2,18 @@
 
 Dual-model architecture
 -----------------------
-Phase 1  (tool calling):  llm_tools = qwen3.5:2b          — native tool-call support
-Phase 2  (answer gen):    llm_plain = selected answer model — better instruction following
+Phase 1  (tool calling):  llm_tools = qwen3.5:2b
+Phase 2  (answer gen):    llm_plain = selected answer model
+
+Self-RAG removed — same-machine LLM calls during retrieval caused
+latency and occasional deadlocks. Pure FAISS+BM25+reranker pipeline.
 
 Prompt design
 -------------
-- No 'Antwort:' / 'Answer:' completion cue: gemma4 chat template renders
-  this inside the user turn, causing the model to return empty. All models
-  start their response naturally after the HumanMessage.
-- Language-aware: DE question → DE prompt, EN question → EN prompt.
-- Bilingual Phase-1 system prompt so tool call fires for any language.
+- No 'Antwort:'/'Answer:' completion cue: gemma4 renders this inside
+  the user turn causing empty responses.
+- Language-aware: DE → DE prompt, EN → EN prompt.
+- answer model has full num_predict=2048 budget.
 """
 from __future__ import annotations
 
@@ -35,10 +37,10 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _OLLAMA_NUM_GPU: int = int(os.environ.get("OLLAMA_NUM_GPU", "-1"))
-_DEFAULT_NUM_CTX: int = 2048
-MAX_TOOL_ITERATIONS: int = 4
-_ANSWER_NUM_PREDICT: int = 1024
+_DEFAULT_NUM_CTX: int = 4096
+_ANSWER_NUM_PREDICT: int = 2048
 _DEFAULT_TOOL_MODEL = "qwen3.5:2b"
+MAX_TOOL_ITERATIONS: int = 4
 
 _THINKING_MODEL_SUBSTRINGS = ("qwen3", "qwen2.5", "deepseek-r", "phi4-reasoning")
 _INSTRUCT_SUFFIXES = ("-instruct", ":instruct")
@@ -82,9 +84,11 @@ def _count_tool_calls(messages: list) -> int:
 
 
 def _split_tool_output(raw: str) -> list[str]:
-    # Split on section markers; keep the [source:...] metadata intact
     parts = re.split(r"--- Abschnitt \d+ ---", raw)
-    return [p.strip() for p in parts if p.strip() and not re.match(r"FOUND SECTIONS|GEFUNDENE ABSCHNITTE", p.strip())]
+    return [
+        p.strip() for p in parts
+        if p.strip() and not re.match(r"FOUND SECTIONS|GEFUNDENE ABSCHNITTE", p.strip())
+    ]
 
 
 def _get_tool_outputs(messages: list) -> list[str]:
@@ -97,7 +101,6 @@ def _get_tool_outputs(messages: list) -> list[str]:
 
 
 def _strip_chunk_metadata(text: str) -> str:
-    """Remove source/bbox/image_path lines from chunk text for LLM consumption."""
     cleaned = _METADATA_RE.sub("", text)
     cleaned = _SECTION_HEADER_RE.sub("", cleaned)
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
@@ -123,12 +126,6 @@ def _get_last_human_question(messages: list) -> str | None:
 
 
 def _build_answer_prompt(question: str, ctx_text: str) -> str:
-    """Build the Phase-2 answer prompt.
-
-    No 'Antwort:' / 'Answer:' suffix — gemma4 chat template puts this
-    inside the user turn which causes an empty model response. All models
-    start their reply naturally after the closing instruction.
-    """
     lang = _detect_language(question)
     if lang == "de":
         return (
@@ -166,8 +163,8 @@ def build_agent(
     graph: object = None,
     all_chunks: list[Chunk] | None = None,
     checkpointer: Any = None,
-    self_rag_enabled: bool = True,
-    self_rag_bm25_gate: float = 0.5,
+    self_rag_enabled: bool = False,   # kept for API compat, ignored
+    self_rag_bm25_gate: float = 0.5,  # kept for API compat, ignored
     num_ctx: int = _DEFAULT_NUM_CTX,
 ) -> Any:
     answer_model = model
@@ -175,19 +172,9 @@ def build_agent(
     if provider == "openai":
         tc_model = answer_model
 
-    logger.info(
-        "Agent — tool_caller=%s  answer=%s",
-        tc_model, answer_model,
-    )
+    logger.info("Agent — tool_caller=%s  answer=%s", tc_model, answer_model)
 
-    tools = build_tools(
-        retriever,
-        graph=graph,
-        all_chunks=all_chunks,
-        self_rag_model=answer_model,
-        self_rag_enabled=self_rag_enabled,
-        self_rag_bm25_gate=self_rag_bm25_gate,
-    )
+    tools = build_tools(retriever, graph=graph, all_chunks=all_chunks)
     tool_node = ToolNode(tools)
     llm_tools = _build_llm(provider, tc_model, num_ctx=num_ctx).bind_tools(tools)
     llm_plain = _build_llm(provider, answer_model, num_ctx=num_ctx, num_predict=_ANSWER_NUM_PREDICT)
@@ -197,7 +184,6 @@ def build_agent(
         messages = state["messages"]
         tool_outputs = _get_tool_outputs(messages)
 
-        # ── Phase 2: generate answer from retrieved chunks ──
         if tool_outputs:
             question = _get_last_human_question(messages) or ""
             trimmed = trim_retrieval_context(tool_outputs)
@@ -217,7 +203,6 @@ def build_agent(
                 response = response.model_copy(update={"content": answer})
             return {"messages": [response]}
 
-        # ── Phase 1: call search_term tool ──
         system_prompt = (
             "You are a contract analyst. "
             "Call the search_term tool with a precise query to find relevant contract sections. "
@@ -271,6 +256,8 @@ def _build_llm(
         base_kwargs["num_predict"] = num_predict
 
     if _is_thinking_model(model):
-        return ChatOllama(**base_kwargs, temperature=0.7, top_p=0.8, top_k=20)
+        return ChatOllama(**base_kwargs, temperature=0.6, top_p=0.9, top_k=20)
 
-    return ChatOllama(**base_kwargs, temperature=0)
+    # gemma4 and instruct models: slightly raised temperature for more
+    # natural, complete responses instead of cut-off answers
+    return ChatOllama(**base_kwargs, temperature=0.1)
